@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.schemas.enums import (
     AgentStatus,
+    MemoryCategory,
+    MemoryScope,
     MessageStatus,
     MessageType,
     ObjectiveStatus,
@@ -32,6 +34,8 @@ class AgentView(BaseModel):
     runtime: str = "claude"
     status: AgentStatus = AgentStatus.IDLE
     session_id: str | None = None
+    session_task_count: int = 0
+    session_objective_id: int | None = None
     current_task_id: int | None = None
     worktree_path: str | None = None
     branch_name: str | None = None
@@ -63,6 +67,8 @@ class AgentRunOutcome(BaseModel):
     """True when this turn continued an existing Claude session."""
     session_restarted: bool = False
     """True when a stale session was detected and a fresh one was started."""
+    rotated: str | None = None
+    """Set when the session was deliberately rotated before this run."""
     cost_usd: float | None = None
     duration_seconds: float | None = None
 
@@ -171,6 +177,11 @@ class ResultOutcome(BaseModel):
     summary: str = ""
     files_changed: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    # Carried through from the response so the orchestrator can build handoffs
+    # and memories without re-parsing.
+    interfaces: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     messages_sent: int = 0
     tasks_created: list[str] = Field(default_factory=list)
     rejected: list[str] = Field(default_factory=list)
@@ -183,3 +194,57 @@ class ResultOutcome(BaseModel):
     def treat_as_failure(self) -> bool:
         """A response we could not parse, or one the agent itself called failed."""
         return not self.parsed or self.status in {"failed", "blocked"}
+
+
+class MemoryView(BaseModel):
+    """A snapshot of one remembered fact."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    scope: MemoryScope
+    scope_id: str | None = None
+    category: MemoryCategory = MemoryCategory.FACT
+    content: str
+    importance: int = 50
+    created_by: str = "human"
+    task_key: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def label(self) -> str:
+        target = f":{self.scope_id}" if self.scope_id else ""
+        return f"{self.scope.value}{target}"
+
+
+class HandoffView(BaseModel):
+    """A structured packet from one agent to another."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    from_agent: str
+    to_agent: str | None = None
+    task_key: str = ""
+    objective_id: int | None = None
+    summary: str = ""
+    important_files: list[str] = Field(default_factory=list)
+    interfaces: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    consumed: bool = False
+    created_at: datetime | None = None
+
+    def render(self) -> str:
+        """The text form injected into the receiving agent's prompt."""
+        lines = [f"From {self.from_agent} (task {self.task_key}): {self.summary}"]
+        if self.interfaces:
+            lines.append("Interfaces: " + "; ".join(self.interfaces))
+        if self.important_files:
+            lines.append("Key files: " + ", ".join(self.important_files[:10]))
+        if self.decisions:
+            lines += ["Decisions:"] + [f"  - {d}" for d in self.decisions]
+        if self.warnings:
+            lines += ["Warnings:"] + [f"  - {w}" for w in self.warnings]
+        return "\n".join(lines)

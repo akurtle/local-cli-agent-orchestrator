@@ -75,6 +75,15 @@ class AgentResponse(BaseModel):
     requested_tasks: list[RequestedTask] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
 
+    # Optional, and used to build handoffs and memories. Absent in an older
+    # response, which stays valid: these default to empty.
+    interfaces: list[str] = Field(default_factory=list)
+    """Contracts other agents will consume, e.g. "POST /api/auth/google"."""
+    decisions: list[str] = Field(default_factory=list)
+    """Choices that should not be silently revisited later."""
+    warnings: list[str] = Field(default_factory=list)
+    """Traps the next agent should know about."""
+
     @field_validator("status")
     @classmethod
     def _known_status(cls, value: str) -> str:

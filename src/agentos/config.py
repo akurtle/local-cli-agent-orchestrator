@@ -48,6 +48,24 @@ class RuntimeSection(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class ContextSection(BaseModel):
+    """How much history an agent carries, and when its session is replaced.
+
+    A persistent Claude session accumulates context indefinitely, which costs
+    more and reasons worse. Rotation caps that, and persisted memory is what
+    survives the boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tasks_per_session: int = Field(default=8, ge=1, le=200)
+    rotate_on_objective_change: bool = True
+    summarise_on_rotation: bool = True
+    """Ask the agent for a short summary before replacing its session."""
+    budgets: dict[str, int] = Field(default_factory=dict)
+    """Per-layer character budgets; see services/context.DEFAULT_BUDGETS."""
+
+
 class ApprovalsSection(BaseModel):
     """Which actions need a human yes.
 
@@ -84,6 +102,7 @@ class Config(BaseModel):
     orchestrator: OrchestratorSection = Field(default_factory=OrchestratorSection)
     runtime: RuntimeSection = Field(default_factory=RuntimeSection)
     approvals: ApprovalsSection = Field(default_factory=ApprovalsSection)
+    context: ContextSection = Field(default_factory=ContextSection)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
 
     @field_validator("runtime", mode="before")
@@ -156,6 +175,11 @@ orchestrator:
 
 # Only "claude" is implemented today. The section exists so other agent CLIs
 # (codex, gemini, ollama) can be plugged in later without config churn.
+# How much context an agent carries between tasks.
+context:
+  max_tasks_per_session: 8
+  rotate_on_objective_change: true
+
 # Which actions need a human yes before they happen.
 approvals:
   manager_plan: true

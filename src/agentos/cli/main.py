@@ -25,6 +25,11 @@ from agentos.cli.agent_commands import (
     pause_agent_command,
 )
 from agentos.cli.context import load_context
+from agentos.cli.context_commands import (
+    context_command,
+    list_memory_command,
+    memory_app,
+)
 from agentos.cli.git_commands import diff_command, git_app
 from agentos.cli.integrate_commands import integrate_command
 from agentos.cli.run_commands import (
@@ -62,6 +67,7 @@ console = Console()
 app.add_typer(agent_app)
 app.add_typer(task_app)
 app.add_typer(git_app)
+app.add_typer(memory_app)
 
 
 @app.command("status")
@@ -99,6 +105,36 @@ def dashboard() -> None:
         DashboardApp(reader).run()
     finally:
         ctx.db.dispose()
+
+
+@app.command("context")
+def context(
+    agent: Annotated[str, typer.Argument(help="Agent name.")],
+    task: Annotated[
+        str | None, typer.Option("--task", help="Assume this task instead of the next.")
+    ] = None,
+    full: Annotated[
+        bool, typer.Option("--full", help="Print the assembled prompt.")
+    ] = False,
+    layer: Annotated[
+        str | None, typer.Option("--layer", help="Print one layer only.")
+    ] = None,
+) -> None:
+    """Show the layered context an agent would receive on its next run."""
+    context_command(agent, task=task, full=full, layer=layer)
+
+
+@app.command("memories")
+def memories(
+    agent: Annotated[
+        str | None, typer.Argument(help="Show only this agent's memory.")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", help="Show only the newest N.")
+    ] = None,
+) -> None:
+    """Show what the orchestrator remembers."""
+    list_memory_command(agent=agent, limit=limit)
 
 
 @app.command("logs")

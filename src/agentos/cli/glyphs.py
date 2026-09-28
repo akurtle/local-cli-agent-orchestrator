@@ -54,3 +54,16 @@ def safe(text: str) -> str:
     except LookupError:
         return text
     return text
+
+
+def literal(text: str) -> str:
+    """Text that must appear exactly as written, not as Rich markup.
+
+    Memories and agent output routinely contain square brackets -- a category tag
+    like [decision], or a log line -- which Rich would otherwise interpret as a
+    style and silently swallow. That is unacceptable in commands whose whole job
+    is to show what is really there.
+    """
+    from rich.markup import escape
+
+    return escape(safe(text))

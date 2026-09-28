@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Engine, text
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,9 @@ ADDITIVE_COLUMNS: tuple[AddColumn, ...] = (
     AddColumn("tasks", "objective_id", "INTEGER REFERENCES objectives(id)"),
     # Phase 7: a task blocked by an agent must not be un-blocked by readiness.
     AddColumn("tasks", "needs_intervention", "BOOLEAN DEFAULT 0"),
+    # Phase 13: session rotation needs to know how much a session has done.
+    AddColumn("agents", "session_task_count", "INTEGER DEFAULT 0"),
+    AddColumn("agents", "session_objective_id", "INTEGER"),
 )
 
 DROPPED_COLUMNS: tuple[DropColumn, ...] = (

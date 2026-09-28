@@ -30,6 +30,8 @@ from sqlalchemy.orm import (
 
 from agentos.schemas.enums import (
     AgentStatus,
+    MemoryCategory,
+    MemoryScope,
     ObjectiveStatus,
     MessageStatus,
     MessageType,
@@ -60,6 +62,11 @@ class Agent(Base):
     current_task_id: Mapped[int | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL"), default=None
     )
+
+    session_task_count: Mapped[int] = mapped_column(Integer, default=0)
+    """Tasks handled in the current session, for rotation."""
+    session_objective_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    """Objective the current session has been working on."""
 
     worktree_path: Mapped[str | None] = mapped_column(Text, default=None)
     branch_name: Mapped[str | None] = mapped_column(String(200), default=None)
@@ -225,3 +232,70 @@ class Run(Base):
 
     def __repr__(self) -> str:
         return f"<Run {self.id} status={self.status} exit={self.exit_code}>"
+
+
+class Memory(Base):
+    """A durable fact the orchestrator injects instead of replaying history.
+
+    Scoped rather than global: what gets recalled depends on the agent, the
+    objective and the task at hand, so a long-lived agent does not accumulate
+    every fact ever learned.
+    """
+
+    __tablename__ = "memories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), index=True)
+    scope_id: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    """Agent name, objective id or task key; null for project scope."""
+
+    category: Mapped[str] = mapped_column(
+        String(24), default=MemoryCategory.FACT.value, index=True
+    )
+    content: Mapped[str] = mapped_column(Text)
+    importance: Mapped[int] = mapped_column(Integer, default=50)
+    """0-100. Higher survives budget trimming."""
+
+    created_by: Mapped[str] = mapped_column(String(64), default="human")
+    task_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    """Where the fact came from, for provenance."""
+
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:
+        return f"<Memory {self.scope}:{self.scope_id} {self.category}>"
+
+
+class Handoff(Base):
+    """A structured packet passed from one agent to the next.
+
+    Exists so a receiving agent never needs the sending agent's conversation.
+    Built by Python from facts it already has, plus optional fields the sending
+    agent supplied in its response block.
+    """
+
+    __tablename__ = "handoffs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    from_agent: Mapped[str] = mapped_column(String(64), index=True)
+    to_agent: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), default=None
+    )
+    task_key: Mapped[str] = mapped_column(String(64), default="")
+    objective_id: Mapped[int | None] = mapped_column(
+        ForeignKey("objectives.id", ondelete="SET NULL"), default=None, index=True
+    )
+
+    summary: Mapped[str] = mapped_column(Text, default="")
+    important_files: Mapped[str] = mapped_column(Text, default="")
+    interfaces: Mapped[str] = mapped_column(Text, default="")
+    decisions: Mapped[str] = mapped_column(Text, default="")
+    warnings: Mapped[str] = mapped_column(Text, default="")
+    consumed: Mapped[bool] = mapped_column(default=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    def __repr__(self) -> str:
+        return f"<Handoff {self.from_agent}->{self.to_agent} {self.task_key}>"

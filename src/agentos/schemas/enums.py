@@ -48,6 +48,35 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class MemoryScope(StrEnum):
+    """What a remembered fact is attached to.
+
+    The scope decides when a fact is recalled: an agent memory follows the agent,
+    a project memory is always relevant, an objective memory applies while that
+    objective is active, and a task memory is narrow.
+    """
+
+    AGENT = "agent"
+    PROJECT = "project"
+    OBJECTIVE = "objective"
+    TASK = "task"
+
+
+class MemoryCategory(StrEnum):
+    FACT = "fact"
+    """Something durably true about the repository or product."""
+    DECISION = "decision"
+    """A choice that was made and should not be silently revisited."""
+    CONVENTION = "convention"
+    """How things are done here."""
+    WARNING = "warning"
+    """A trap somebody already fell into."""
+    HANDOFF = "handoff"
+    """What one agent needs another to know."""
+    SESSION_SUMMARY = "session_summary"
+    """Carried across a session rotation so knowledge is not lost."""
+
+
 class FailureKind(StrEnum):
     """Why a task attempt did not succeed.
 

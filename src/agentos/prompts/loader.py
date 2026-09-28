@@ -49,7 +49,10 @@ End every reply with one response block, exactly once, in this form:
     {{"agent_role": "qa", "title": "Test login endpoint",
      "description": "Verify valid and invalid credentials."}}
   ],
-  "blockers": []
+  "blockers": [],
+  "interfaces": ["POST /api/auth/google"],
+  "decisions": ["Reused the existing JWT session model."],
+  "warnings": []
 }}
 {RESPONSE_END}
 
@@ -63,6 +66,11 @@ Rules for the block:
   the orchestrator delivers these. Address them by agent name.
 - `requested_tasks` is how you ask for follow-up work by someone else. The
   orchestrator validates each one and may reject it.
+- `interfaces` are contracts other agents will consume. List anything they
+  must call exactly right.
+- `decisions` are choices that should not be silently revisited. These are
+  remembered and shown to other agents later, so keep them short and factual.
+- `warnings` are traps the next agent should know about.
 - Emit the block last. Write any explanation before it, not inside it.
 - The JSON must be valid. No comments, no trailing commas.
 """.strip()

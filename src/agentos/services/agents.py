@@ -17,8 +17,16 @@ from agentos.prompts.loader import build_system_prompt
 from agentos.repositories.agents import AgentNotFound, AgentRepository
 from agentos.runtime.base import AgentRuntime
 from agentos.schemas.dto import AgentRunOutcome, AgentView
-from agentos.schemas.enums import AgentStatus
+from agentos.schemas.enums import AgentStatus, MemoryCategory, MemoryScope
 from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
+from agentos.services.memory import MemoryService
+from agentos.services.rotation import (
+    SUMMARY_INSTRUCTION,
+    RotationDecision,
+    RotationReason,
+    parse_summary,
+    should_rotate,
+)
 from agentos.services.runs import record_run
 
 # Statuses an agent may move to from a given status. Kept as data so the rules
@@ -75,6 +83,8 @@ class AgentService:
         self.runtime = runtime
         self.project_root = project_root
         self.agents = AgentRepository(db)
+        # Rotation needs somewhere to put what the old session knew.
+        self.memory = MemoryService(db, config)
 
     # ------------------------------------------------------------ config -> db
 
@@ -192,6 +202,106 @@ class AgentService:
         self.get_agent(name)
         return self.agents.set_session_id(name, None)
 
+    # ----------------------------------------------------------------- rotation
+
+    def rotation_decision(
+        self, agent: AgentView, objective_id: int | None = None
+    ) -> RotationDecision:
+        """Whether this agent's session should be replaced before its next task."""
+        context = self.config.context
+        return should_rotate(
+            session_id=agent.session_id,
+            session_task_count=agent.session_task_count,
+            session_objective_id=agent.session_objective_id,
+            next_objective_id=objective_id,
+            max_tasks_per_session=context.max_tasks_per_session,
+            rotate_on_objective_change=context.rotate_on_objective_change,
+        )
+
+    async def maybe_rotate(
+        self, name: str, objective_id: int | None = None
+    ) -> str | None:
+        """Rotate if policy says so. Returns a description, or None.
+
+        Callers that build a prompt must invoke this *first*: rotation harvests
+        knowledge into memory, and that memory has to be available when the
+        prompt is assembled. Rotating afterwards would drop the carried facts on
+        the very first task of the new session -- the one that needs them most.
+        """
+        agent = self.get_agent(name)
+        decision = self.rotation_decision(agent, objective_id)
+        if not decision.rotate or decision.reason is None:
+            return None
+        await self.rotate_session(name, decision.reason, objective_id)
+        return f"{decision.reason.value}: {decision.detail}"
+
+    async def rotate_session(
+        self,
+        name: str,
+        reason: RotationReason = RotationReason.MANUAL,
+        objective_id: int | None = None,
+    ) -> list[str]:
+        """Replace an agent's session, carrying knowledge across as memory.
+
+        Order matters: the summary is taken and persisted *before* the session is
+        discarded, so a failure in between loses nothing that was not already
+        saved. Returns the facts carried forward.
+        """
+        agent = self.get_agent(name)
+        if not agent.session_id:
+            return []
+
+        carried: list[str] = []
+        if self.config.context.summarise_on_rotation:
+            carried = await self._harvest_session_knowledge(agent)
+
+        # Discard the conversation. The next run starts fresh and is given the
+        # persisted memory instead.
+        await asyncio.to_thread(
+            self.agents.set_session,
+            name,
+            None,
+            0,
+            objective_id,
+        )
+        return carried
+
+    async def _harvest_session_knowledge(self, agent: AgentView) -> list[str]:
+        """Ask the agent what is worth keeping, then persist it.
+
+        A failure here is not fatal: losing a summary is worse than losing the
+        run, but not worth refusing to rotate over, since the alternative is an
+        ever-growing session.
+        """
+        try:
+            result = await self._invoke(
+                agent=agent,
+                prompt=SUMMARY_INSTRUCTION,
+                system_prompt=self.system_prompt_for(agent),
+                working_dir=str(self.project_root or Path.cwd()),
+                timeout=self.config.orchestrator.default_timeout_seconds,
+                on_event=None,
+            )
+        except Exception:
+            return []
+
+        if not result.ok:
+            return []
+
+        facts = parse_summary(result.text)
+        for fact in facts:
+            await asyncio.to_thread(
+                self.memory.remember,
+                MemoryScope.AGENT,
+                fact,
+                agent.name,
+                MemoryCategory.SESSION_SUMMARY,
+                None,
+                agent.name,
+                None,
+            )
+        return facts
+
     # ---------------------------------------------------------------- execution
 
     async def run_agent(
@@ -202,6 +312,8 @@ class AgentService:
         cwd: str | None = None,
         timeout_seconds: float | None = None,
         on_event: Callable[[StreamEvent], None] | None = None,
+        objective_id: int | None = None,
+        system_prompt: str | None = None,
     ) -> AgentRunOutcome:
         """Invoke one agent turn, persisting the run and its session.
 
@@ -217,8 +329,17 @@ class AgentService:
                 f"{name} is already working on task {agent.current_task_id}"
             )
 
-        system_prompt = self.system_prompt_for(agent)
+        # A caller may supply a fully layered prompt; otherwise fall back to the
+        # role prompt alone, which keeps older callers working unchanged.
+        system_prompt = system_prompt or self.system_prompt_for(agent)
         working_dir = cwd or agent.worktree_path or str(self.project_root or Path.cwd())
+
+        # Safety net for callers that did not rotate first (e.g. `agent run`).
+        # The scheduler calls maybe_rotate before assembling its prompt, so this
+        # is normally a no-op there.
+        rotated_reason = await self.maybe_rotate(name, objective_id)
+        if rotated_reason:
+            agent = self.get_agent(name)
         timeout = timeout_seconds or self.config.orchestrator.default_timeout_seconds
 
         agent = await asyncio.to_thread(
@@ -273,6 +394,12 @@ class AgentService:
         if result.session_id:
             await asyncio.to_thread(self.agents.set_session_id, name, result.session_id)
 
+        # A completed turn counts against the session's task budget.
+        if result.ok:
+            await asyncio.to_thread(
+                self.agents.increment_session_tasks, name, objective_id
+            )
+
         final_status = AgentStatus.IDLE if result.ok else AgentStatus.FAILED
         agent = await asyncio.to_thread(
             self._safe_transition, name, final_status, True
@@ -287,6 +414,7 @@ class AgentService:
             session_id=result.session_id,
             resumed=resumed,
             session_restarted=session_restarted,
+            rotated=rotated_reason,
             cost_usd=result.cost_usd,
             duration_seconds=result.duration_seconds,
         )

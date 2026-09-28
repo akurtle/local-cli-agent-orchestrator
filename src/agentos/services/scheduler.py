@@ -20,6 +20,8 @@ from agentos.schemas.dto import SchedulerReport, TaskView
 from agentos.schemas.enums import AgentStatus, FailureKind, TaskStatus
 from agentos.services import dag
 from agentos.services.agents import AgentBusy, AgentPaused, AgentService
+from agentos.services.context_service import ContextService
+from agentos.services.memory import MemoryService
 from agentos.services.messages import MessageService
 from agentos.services.results import ResultProcessor, build_repair_prompt
 from agentos.services.tasks import TaskService
@@ -36,6 +38,9 @@ class SchedulerEvent:
     COMPLETED = "completed"
     MESSAGE = "message"
     WORKSPACE = "workspace"
+    ROTATED = "rotated"
+    REMEMBERED = "remembered"
+    HANDOFF = "handoff"
     CHANGES = "changes"
     SPAWNED = "spawned"
     REPAIR = "repair"
@@ -86,6 +91,8 @@ class Scheduler:
         message_service: MessageService | None = None,
         result_processor: ResultProcessor | None = None,
         workspace_service: WorkspaceService | None = None,
+        context_service: ContextService | None = None,
+        memory_service: MemoryService | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self.db = db
@@ -97,6 +104,10 @@ class Scheduler:
             db, config, task_service, self.messages
         )
         self.workspaces = workspace_service
+        self.memory = memory_service or MemoryService(db, config)
+        self.context = context_service or ContextService(
+            db, config, task_service, self.memory
+        )
         self.on_progress = on_progress
         self._stopping = False
 
@@ -143,13 +154,13 @@ class Scheduler:
 
     # ---------------------------------------------------------------- execution
 
-    def _build_prompt(self, task: TaskView, inbox) -> str:
-        return build_task_prompt(
-            task=task,
-            dependencies=self.tasks.completed_dependencies(task),
-            inbox=inbox.items,
-            retry_of=task.error if task.attempts else None,
-        )
+    def _build_context(self, agent, task: TaskView, inbox):
+        """Assemble the layered context for one task.
+
+        Replaces flat prompt concatenation: the orchestrator now decides, layer
+        by layer, what the agent sees, and each layer has a budget.
+        """
+        return self.context.assemble(agent=agent, task=task, inbox=inbox.items)
 
     async def _run_task(
         self, task: TaskView
@@ -166,13 +177,13 @@ class Scheduler:
         # Claim unread messages. They are marked delivered now and only
         # confirmed read once this run finishes, so a crash cannot lose them.
         inbox = await asyncio.to_thread(self.messages.take_inbox, agent_name)
-        prompt = self._build_prompt(task, inbox)
 
         # Give the agent an isolated worktree if it is configured for one, so two
-        # coding agents never edit the same checkout at once.
+        # coding agents never edit the same checkout at once. Done before context
+        # assembly so the identity layer can state which branch it is on.
         workspace = None
+        agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
         if self.workspaces is not None:
-            agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
             workspace = await self.workspaces.prepare(agent_view)
             if workspace.warning:
                 self._notify(
@@ -189,6 +200,19 @@ class Scheduler:
                     SchedulerEvent.WORKSPACE,
                     f"{agent_name} -> {workspace.branch}",
                 )
+                agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
+
+        # Rotate first: rotation writes what the old session knew into memory,
+        # and the prompt below must be able to recall it.
+        rotated = await self.agents.maybe_rotate(agent_name, task.objective_id)
+        if rotated:
+            self._notify(SchedulerEvent.ROTATED, f"{agent_name}: {rotated}")
+            agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
+
+        assembled = await asyncio.to_thread(
+            self._build_context, agent_view, task, inbox
+        )
+        prompt = assembled.prompt
 
         try:
             outcome = await self.agents.run_agent(
@@ -196,6 +220,7 @@ class Scheduler:
                 prompt,
                 task_id=task.id,
                 cwd=str(workspace.path) if workspace else None,
+                objective_id=task.objective_id,
             )
         except (AgentBusy, AgentPaused) as exc:
             # Lost a race for the agent: return the task to the queue untouched.
@@ -242,9 +267,10 @@ class Scheduler:
             )
             return task, False, reason, outcome.text, classify_result(result)
 
-        # The run completed and its response was understood: the messages that
-        # went into this prompt are genuinely consumed.
+        # The run completed and its response was understood: the messages and
+        # handoffs that went into this prompt are genuinely consumed.
         await asyncio.to_thread(self.messages.confirm_read, inbox)
+        await asyncio.to_thread(self.memory.confirm_handoffs, assembled.handoffs)
 
         summary = result.summary or outcome.text
         # Only report changes for an isolated worktree. In a shared project
@@ -273,7 +299,64 @@ class Scheduler:
                 )
             summary = summary + "\n\n" + report.render()
 
+        await self._record_knowledge(task, agent_name, result)
         return task, True, None, summary, None
+
+    async def _record_knowledge(self, task: TaskView, agent_name: str, result) -> None:
+        """Persist what should outlive this run, and hand off to dependents.
+
+        Only the durable parts: decisions and warnings change what a later agent
+        should do, so they become memories. The summary describes one task and is
+        already stored on it.
+        """
+        stored = await asyncio.to_thread(
+            self.memory.record_from_response,
+            agent_name,
+            task,
+            result.decisions,
+            result.warnings,
+            task.objective_id,
+        )
+        if stored:
+            self._notify(
+                SchedulerEvent.REMEMBERED,
+                f"{agent_name}: {len(stored)} fact(s) from {task.key}",
+            )
+
+        # A handoff is only useful if somebody is waiting on this work.
+        recipients = await asyncio.to_thread(self._dependent_agents, task)
+        for recipient in recipients:
+            await asyncio.to_thread(
+                self.memory.create_handoff,
+                agent_name,
+                task,
+                result.summary,
+                recipient,
+                result.files_changed,
+                result.interfaces,
+                result.decisions,
+                result.warnings,
+            )
+            self._notify(
+                SchedulerEvent.HANDOFF, f"{agent_name} -> {recipient} ({task.key})"
+            )
+
+    def _dependent_agents(self, task: TaskView) -> list[str]:
+        """Agents assigned to tasks that depend on this one.
+
+        The receiving agent gets a small packet instead of needing this agent's
+        conversation, which is what makes independent sessions workable.
+        """
+        recipients: list[str] = []
+        for candidate in self.tasks.list_tasks():
+            if candidate.id == task.id or candidate.status.is_terminal:
+                continue
+            if task.key not in candidate.depends_on:
+                continue
+            owner = candidate.assigned_agent
+            if owner and owner != task.assigned_agent and owner not in recipients:
+                recipients.append(owner)
+        return recipients
 
     async def _apply_result(self, task: TaskView, agent_name: str, text: str):
         """Validate the agent response and apply what it legitimately asks for.

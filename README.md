@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: all 12 phases complete
+## Status: phase 13 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -36,6 +36,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 10 | Integrator | **done** |
 | 11 | Approval gates | **done** |
 | 12 | Textual TUI | **done** |
+| 13 | Context and memory management | **done** |
 
 ## Install
 
@@ -57,13 +58,16 @@ agentctl messages | message <agent> "..."   the message bus
 agentctl diff <agent> | git status          what an agent changed
 agentctl integrate [--apply]                merge branches that merge cleanly
 agentctl logs <agent> | runs | run-show     invocation history
+agentctl context <agent> [--full|--layer]   what the next prompt will contain
+agentctl memories | memory add|forget       what the orchestrator remembers
+agentctl memory handoffs                    packets passed between agents
 agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 527 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 607 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -175,6 +179,48 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Context is layered, not concatenated
+The orchestrator decides what an agent sees, layer by layer:
+
+```
+IDENTITY -> WHAT YOU HAVE LEARNED -> PROJECT FACTS -> OBJECTIVE
+         -> TASK -> HANDOFFS -> INBOX -> NOW
+```
+
+Two invariants hold it together. **No layer grows without bound**: each has a
+character budget, and over budget the least important items are dropped, never
+the most important. **Conversation history is never copied forward**: knowledge
+crosses a session boundary only as a persisted memory or a handoff. There is a
+test asserting `ContextBuilder.build` has no `history`/`transcript` parameter, so
+replay cannot creep back in.
+
+`ContextBuilder` is pure, so every budgeting and ordering rule is tested without a
+database. `agentctl context <agent>` prints exactly what would be injected, with
+each layer's size against its budget -- the only practical way to debug a prompt.
+
+### Sessions rotate; knowledge survives
+`context.max_tasks_per_session` and `rotate_on_objective_change` cap how long a
+session lives. On rotation the agent is asked for at most eight short bullets of
+durable facts, those become memories, and only then is the session discarded.
+
+Ordering matters and was got wrong first: rotation must happen **before** the
+prompt is assembled, or the first task of the new session loses the very facts
+rotation just harvested. A test covers it.
+
+### Memory is scoped, and written by Python
+Facts are attached to a project, an agent, an objective or a task, so recall is
+targeted rather than everything ever learned. An agent can state a decision in its
+response block; the orchestrator decides whether to keep it, at what importance,
+and in what scope. Duplicates merge rather than accumulate, and importance only
+ever rises on a repeat.
+
+### Handoffs replace reading someone else's history
+When a task another agent depends on completes, Python builds a small packet --
+summary, interfaces, key files, decisions, warnings -- from facts it already has.
+The receiving agent gets that instead of the sender's conversation, which is what
+makes independent sessions workable. Like messages, a handoff is confirmed only
+after a successful run, so a crash cannot swallow it.
 
 ### The TUI is a viewer, not a second orchestrator
 `agentctl dashboard` shows agents, tasks, messages and per-agent output over the
@@ -353,6 +399,10 @@ src/agentos/
   db/migrations.py   additive column migrations
   cli/main.py        agentctl
   cli/glyphs.py      ASCII fallback for legacy Windows consoles
+  services/context.py     PURE context layering with per-layer budgets
+  services/context_service.py  gathers the layers from the database
+  services/memory.py      scoped memory and handoff packets
+  services/rotation.py    PURE session rotation policy
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

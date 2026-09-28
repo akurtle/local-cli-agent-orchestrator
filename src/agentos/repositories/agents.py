@@ -28,6 +28,8 @@ def _to_view(row: Agent) -> AgentView:
         status=AgentStatus(row.status),
         session_id=row.session_id,
         current_task_id=row.current_task_id,
+        session_task_count=row.session_task_count,
+        session_objective_id=row.session_objective_id,
         worktree_path=row.worktree_path,
         branch_name=row.branch_name,
         model=row.model,
@@ -121,6 +123,43 @@ class AgentRepository:
             if row is None:
                 raise AgentNotFound(name)
             row.session_id = session_id
+            session.flush()
+            return _to_view(row)
+
+    def set_session(
+        self,
+        name: str,
+        session_id: str | None,
+        task_count: int | None = None,
+        objective_id: int | None = None,
+    ) -> AgentView:
+        """Update a session and its counters together.
+
+        One write, so a session id can never be stored without its counters
+        being consistent with it.
+        """
+        with self.db.session() as session:
+            row = session.scalar(select(Agent).where(Agent.name == name))
+            if row is None:
+                raise AgentNotFound(name)
+            row.session_id = session_id
+            if task_count is not None:
+                row.session_task_count = max(0, task_count)
+            if objective_id is not None or session_id is None:
+                row.session_objective_id = objective_id
+            session.flush()
+            return _to_view(row)
+
+    def increment_session_tasks(
+        self, name: str, objective_id: int | None = None
+    ) -> AgentView:
+        with self.db.session() as session:
+            row = session.scalar(select(Agent).where(Agent.name == name))
+            if row is None:
+                raise AgentNotFound(name)
+            row.session_task_count += 1
+            if objective_id is not None:
+                row.session_objective_id = objective_id
             session.flush()
             return _to_view(row)
 

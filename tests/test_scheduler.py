@@ -88,10 +88,21 @@ class RecordingRuntime(StubRuntime):
         self.max_active = 0
         self.order: list[str] = []
 
-    def _label(self, prompt: str) -> str:
-        for line in prompt.splitlines():
-            if line.startswith("## TASK "):
-                return line.removeprefix("## TASK ").strip()
+    @staticmethod
+    def _label(prompt: str) -> str:
+        """Find the task key in either the standalone or layered prompt form."""
+        lines = prompt.splitlines()
+        for index, line in enumerate(lines):
+            # The standalone form is "## TASK T-1"; as a layer the heading is
+            # bare "## TASK" and the key opens the next line.
+            if line.startswith("## TASK"):
+                rest = line.removeprefix("## TASK").strip()
+                if rest:
+                    return rest
+                # Layered form: the key starts the next non-blank line.
+                for follower in lines[index + 1 :]:
+                    if follower.strip():
+                        return follower.split(":", 1)[0].strip()
         return "?"
 
     async def run(self, request: RunRequest, on_event=None) -> RunResult:
@@ -240,7 +251,7 @@ async def test_chain_of_three(db, config, tmp_path) -> None:
 
 
 async def test_failed_dependency_blocks_dependent(db, config, tmp_path) -> None:
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     a = tasks.create_task("will fail", agent="backend")
     b = tasks.create_task("dependent", agent="frontend", depends_on=[a.key])
@@ -342,7 +353,7 @@ async def test_busy_agent_defers_work(db, config, tmp_path) -> None:
 
 async def test_failure_without_retries_marks_failed(db, tmp_path) -> None:
     config = make_config(max_task_retries=0)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     task = tasks.create_task("doomed", agent="backend")
     report = await scheduler.run()
@@ -353,7 +364,7 @@ async def test_failure_without_retries_marks_failed(db, tmp_path) -> None:
 
 async def test_failure_is_retried_once(db, tmp_path) -> None:
     config = make_config(max_task_retries=1)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     task = tasks.create_task("doomed", agent="backend")
 
@@ -365,7 +376,7 @@ async def test_failure_is_retried_once(db, tmp_path) -> None:
 
 async def test_retry_prompt_includes_previous_error(db, tmp_path) -> None:
     config = make_config(max_task_retries=1)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     tasks.create_task("doomed", agent="backend")
     await scheduler.run()
@@ -376,7 +387,7 @@ async def test_retry_prompt_includes_previous_error(db, tmp_path) -> None:
 async def test_retries_are_bounded(db, tmp_path) -> None:
     """A permanently failing task must not loop forever."""
     config = make_config(max_task_retries=2)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     task = tasks.create_task("doomed", agent="backend")
     report = await scheduler.run()
@@ -478,7 +489,7 @@ async def test_request_stop_prevents_new_dispatch(db, config, tmp_path) -> None:
 
 
 async def test_blocked_only_graph_settles(db, config, tmp_path) -> None:
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     a = tasks.create_task("fails", agent="backend")
     tasks.create_task("blocked", agent="frontend", depends_on=[a.key])
@@ -599,7 +610,7 @@ async def test_human_message_is_injected(db, config, tmp_path) -> None:
 async def test_failed_run_preserves_unread_message(db, tmp_path) -> None:
     """A failed run must not consume the inbox."""
     config = make_config(max_task_retries=0)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     scheduler.messages.send_from_human("backend", "do not lose me")
     tasks.create_task("doomed", agent="backend")
@@ -611,7 +622,7 @@ async def test_failed_run_preserves_unread_message(db, tmp_path) -> None:
 
 async def test_message_redelivered_on_retry(db, tmp_path) -> None:
     config = make_config(max_task_retries=1)
-    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     scheduler.messages.send_from_human("backend", "persistent note")
     tasks.create_task("doomed", agent="backend")
@@ -939,3 +950,188 @@ async def test_dry_run_crash_is_infrastructure_and_retries(db, tmp_path) -> None
     # Initial attempt plus one retry, because a crash is worth retrying.
     assert len(runtime.requests) == 2
     assert not tasks.get_task(task.key).needs_intervention
+
+
+# -------------------------------------------- phase 13: context and rotation
+
+
+def block_with(**extras) -> str:
+    """A response block carrying the optional handoff fields."""
+    payload = {
+        "status": "completed",
+        "summary": "did it",
+        "files_changed": [],
+        "messages": [],
+        "requested_tasks": [],
+        "blockers": [],
+    }
+    payload.update(extras)
+    return "\n".join([RESPONSE_BEGIN, json.dumps(payload), RESPONSE_END])
+
+
+async def test_prompt_is_layered_not_concatenated(db, config, tmp_path) -> None:
+    """The orchestrator decides the sections, so they must actually appear."""
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    scheduler.memory.remember(
+        __import__("agentos.schemas.enums", fromlist=["MemoryScope"]).MemoryScope.PROJECT,
+        "Framework: FastAPI",
+    )
+    tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+    prompt = runtime.requests[0].prompt
+    assert "## IDENTITY" in prompt
+    assert "## PROJECT FACTS" in prompt
+    assert "Framework: FastAPI" in prompt
+    assert "## TASK" in prompt
+    assert "## NOW" in prompt
+
+
+async def test_decisions_are_remembered_across_tasks(db, config, tmp_path) -> None:
+    """A later task sees an earlier decision without any conversation replay."""
+    runtime = RecordingRuntime(
+        raw_text={"T-1": block_with(decisions=["Reused the JWT session model."])}
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    tasks.create_task("first", agent="backend")
+    tasks.create_task("second", agent="backend")
+
+    await scheduler.run()
+
+    assert any(e == "remembered" for e, _ in events)
+    # The second prompt carries the decision as a recalled fact.
+    assert "Reused the JWT session model." in runtime.requests[1].prompt
+
+
+async def test_handoff_reaches_the_dependent_agent(db, config, tmp_path) -> None:
+    """frontend gets a packet, not backend's history."""
+    runtime = RecordingRuntime(
+        raw_text={
+            "T-1": block_with(
+                summary="OAuth endpoint implemented.",
+                interfaces=["POST /api/auth/google"],
+                decisions=["Uses existing JWT session model."],
+            )
+        }
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    first = tasks.create_task("backend work", agent="backend")
+    tasks.create_task("frontend work", agent="frontend", depends_on=[first.key])
+
+    await scheduler.run()
+
+    assert any(e == "handoff" for e, _ in events)
+    frontend_prompt = runtime.requests[1].prompt
+    assert "## HANDOFFS" in frontend_prompt
+    assert "POST /api/auth/google" in frontend_prompt
+    assert "rather than redoing it" in frontend_prompt
+
+
+async def test_no_handoff_without_a_dependent(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    tasks.create_task("standalone", agent="backend")
+    await scheduler.run()
+    assert not any(e == "handoff" for e, _ in events)
+    assert scheduler.memory.list_handoffs() == []
+
+
+async def test_handoff_is_consumed_once(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    first = tasks.create_task("backend work", agent="backend")
+    tasks.create_task("frontend work", agent="frontend", depends_on=[first.key])
+    await scheduler.run()
+    assert scheduler.memory.take_handoffs("frontend") == []
+
+
+async def test_session_rotates_on_the_task_budget(db, tmp_path) -> None:
+    """A long-lived agent must not accumulate context forever."""
+    config = make_config()
+    config.context.max_tasks_per_session = 2
+    config.context.summarise_on_rotation = False
+
+    runtime = RecordingRuntime()
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    for i in range(3):
+        tasks.create_task(f"task {i}", agent="backend")
+
+    await scheduler.run()
+
+    assert any(e == "rotated" for e, _ in events)
+    rotated = [d for e, d in events if e == "rotated"]
+    assert "task_budget" in rotated[0]
+    # The third run started a fresh session rather than resuming.
+    assert runtime.requests[2].resume is False
+
+
+async def test_rotation_carries_knowledge_forward(db, tmp_path) -> None:
+    """The point of rotation being safe: facts survive, conversation does not."""
+    config = make_config()
+    config.context.max_tasks_per_session = 1
+    config.context.summarise_on_rotation = True
+
+    class SummarisingRuntime(RecordingRuntime):
+        async def run(self, request, on_event=None):
+            if "session is being replaced" in request.prompt:
+                self.requests.append(request)
+                self.order.append("summary")
+                return RunResult(
+                    status=RunStatus.SUCCEEDED,
+                    session_id=request.session_id,
+                    exit_code=0,
+                    text="- Tests live in tests/backend.\n- Uses FastAPI.\n",
+                )
+            return await super().run(request, on_event=on_event)
+
+    runtime = SummarisingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("first", agent="backend")
+    tasks.create_task("second", agent="backend")
+
+    await scheduler.run()
+
+    remembered = [m.content for m in scheduler.memory.recall_agent("backend")]
+    assert "Tests live in tests/backend." in remembered
+    assert "Uses FastAPI." in remembered
+    # And the surviving facts are injected into the new session.
+    assert "Tests live in tests/backend." in runtime.requests[-1].prompt
+
+
+async def test_rotation_does_not_replay_conversation(db, tmp_path) -> None:
+    """After rotation the new session is genuinely fresh."""
+    config = make_config()
+    config.context.max_tasks_per_session = 1
+    config.context.summarise_on_rotation = False
+
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("first", agent="backend")
+    tasks.create_task("second", agent="backend")
+
+    await scheduler.run()
+
+    second = runtime.requests[1]
+    assert second.resume is False
+    # Nothing from the first task's prompt is carried over verbatim.
+    assert "## TASK T-1" not in second.prompt
+
+
+async def test_session_task_count_tracks_completions(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("one", agent="backend")
+    tasks.create_task("two", agent="backend")
+    await scheduler.run()
+    assert scheduler.agents.get_agent("backend").session_task_count == 2
+
+
+async def test_failed_run_does_not_consume_the_session_budget(db, tmp_path) -> None:
+    """Only completed turns count, so a crash loop cannot force rotation."""
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(fail_contains={"T-1:"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("doomed", agent="backend")
+    await scheduler.run()
+    assert scheduler.agents.get_agent("backend").session_task_count == 0
