@@ -79,6 +79,28 @@ def status(
     status_command(watch=watch)
 
 
+@app.command("dashboard")
+def dashboard() -> None:
+    """Open the interactive dashboard (read-only)."""
+    ctx = load_context()
+    try:
+        from agentos.tui.app import DashboardApp
+        from agentos.tui.snapshot import SnapshotReader
+    except ImportError as exc:
+        console.print(
+            "[red]The dashboard needs Textual.[/] Install it with: "
+            'pip install "agentos[tui]"'
+        )
+        ctx.db.dispose()
+        raise typer.Exit(code=2) from exc
+
+    reader = SnapshotReader(ctx.db, ctx.config, ctx.paths)
+    try:
+        DashboardApp(reader).run()
+    finally:
+        ctx.db.dispose()
+
+
 @app.command("logs")
 def logs(
     agent: Annotated[str, typer.Argument(help="Agent name.")],

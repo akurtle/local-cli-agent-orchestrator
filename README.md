@@ -15,11 +15,12 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 11 complete
+## Status: all 12 phases complete
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
-follow-up work.
+follow-up work. Branches are integrated conservatively, human approval gates the
+actions that matter, and there is both a Rich CLI and a Textual dashboard.
 
 | Phase | Scope | State |
 |---|---|---|
@@ -34,19 +35,35 @@ follow-up work.
 | 9 | Configurable agent definitions | **done** |
 | 10 | Integrator | **done** |
 | 11 | Approval gates | **done** |
-| 12 | Textual TUI | next |
+| 12 | Textual TUI | **done** |
 
 ## Install
 
 ```bash
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m pip install -e ".[dev]"   # includes the TUI
+```
+
+## Command overview
+
+```
+agentctl init | doctor                      set up and check a project
+agentctl run "<objective>"                  manager plans, you approve
+agentctl work [--dry-run]                   execute ready tasks
+agentctl status [--watch N] | dashboard     Rich view | Textual view
+agentctl agents | agent show|run            per-agent inspection and invocation
+agentctl tasks | task create|show|cancel|retry|unblock
+agentctl messages | message <agent> "..."   the message bus
+agentctl diff <agent> | git status          what an agent changed
+agentctl integrate [--apply]                merge branches that merge cleanly
+agentctl logs <agent> | runs | run-show     invocation history
+agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 509 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 527 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -158,6 +175,17 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### The TUI is a viewer, not a second orchestrator
+`agentctl dashboard` shows agents, tasks, messages and per-agent output over the
+same services the CLI uses. Widgets only display a `Snapshot` and turn keystrokes
+into selections; there is no orchestration logic in the interface, which also
+means the whole view is testable without starting Textual.
+
+Its reader is deliberately wired to a runtime that raises if asked to run
+anything, so a read-only screen cannot spend usage by accident. Textual is an
+optional dependency (`pip install "agentos[tui]"`) and the command explains that
+if it is missing.
 
 ### A gate that passes unwatched is not a gate
 `approvals` in config decides which actions need a human yes. The two that change
@@ -325,6 +353,8 @@ src/agentos/
   db/migrations.py   additive column migrations
   cli/main.py        agentctl
   cli/glyphs.py      ASCII fallback for legacy Windows consoles
+  tui/snapshot.py    everything the dashboard shows, gathered from services
+  tui/app.py         Textual widgets; display only
 tests/
   fixtures/fake_claude.py   stub CLI: tests run offline and free
 ```
