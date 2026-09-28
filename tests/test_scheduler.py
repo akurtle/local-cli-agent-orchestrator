@@ -6,6 +6,7 @@ Uses stub runtimes, so nothing is launched and nothing is spent.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from agentos.config import Config
 from agentos.db.session import Database
 from agentos.runtime.dry_run import DryRunRuntime
 from agentos.schemas.enums import AgentStatus, RunStatus, TaskStatus
+from agentos.schemas.responses import RESPONSE_BEGIN, RESPONSE_END
 from agentos.schemas.runtime import RunRequest, RunResult
 from agentos.services.agents import AgentService
 from agentos.services.dag import DependencyCycle
@@ -40,17 +42,51 @@ def make_config(**orchestrator) -> Config:
     return Config.model_validate(data)
 
 
-class RecordingRuntime(StubRuntime):
-    """Tracks concurrency and can be told which prompts should fail."""
+def response_block(
+    status: str = "completed",
+    summary: str = "",
+    messages: list[dict] | None = None,
+    requested_tasks: list[dict] | None = None,
+    blockers: list[str] | None = None,
+) -> str:
+    """Render a valid agent response block, as a real agent must."""
+    payload = {
+        "status": status,
+        "summary": summary,
+        "files_changed": [],
+        "messages": messages or [],
+        "requested_tasks": requested_tasks or [],
+        "blockers": blockers or [],
+    }
+    return "\n".join([RESPONSE_BEGIN, json.dumps(payload), RESPONSE_END])
 
-    def __init__(self, delay: float = 0.05, fail_contains: set[str] | None = None):
+
+class RecordingRuntime(StubRuntime):
+    """Tracks concurrency and emits valid response blocks.
+
+    The scheduler requires a parseable response, so a stub that returns prose
+    would be exercising the repair path rather than the happy path.
+    """
+
+    def __init__(
+        self,
+        delay: float = 0.05,
+        fail_contains: set[str] | None = None,
+        messages: dict[str, list[dict]] | None = None,
+        requested: dict[str, list[dict]] | None = None,
+        raw_text: dict[str, str] | None = None,
+    ):
         super().__init__()
         self.delay = delay
         self.fail_contains = fail_contains or set()
+        # task key -> extras the agent asks for on that task
+        self.messages_for = messages or {}
+        self.requested_for = requested or {}
+        # task key -> literal reply, for testing malformed output
+        self.raw_text = raw_text or {}
         self.active = 0
         self.max_active = 0
         self.order: list[str] = []
-        self.concurrent_groups: list[set[str]] = []
 
     def _label(self, prompt: str) -> str:
         for line in prompt.splitlines():
@@ -67,11 +103,21 @@ class RecordingRuntime(StubRuntime):
         try:
             await asyncio.sleep(self.delay)
             failing = any(f in request.prompt for f in self.fail_contains)
+            if label in self.raw_text:
+                text = self.raw_text[label]
+            elif failing:
+                text = response_block(status="failed", blockers=["simulated failure"])
+            else:
+                text = f"Working on {label}." + "\n\n" + response_block(
+                    summary=f"did {label}",
+                    messages=self.messages_for.get(label),
+                    requested_tasks=self.requested_for.get(label),
+                )
             return RunResult(
                 status=RunStatus.FAILED if failing else RunStatus.SUCCEEDED,
                 session_id=request.session_id or f"s-{len(self.requests)}",
                 exit_code=1 if failing else 0,
-                text=f"did {label}",
+                text=text,
                 error="simulated failure" if failing else None,
             )
         finally:
@@ -508,3 +554,183 @@ async def test_dry_run_can_simulate_failure(db, config, tmp_path) -> None:
 def test_dry_run_preflight_needs_no_auth() -> None:
     info = DryRunRuntime().preflight()
     assert "not required" in info["auth"]
+
+
+# ------------------------------------------------- phase 4: bus integration
+
+
+async def test_backend_message_reaches_frontend_prompt(db, config, tmp_path) -> None:
+    """The spec demonstration: backend -> frontend via the orchestrator.
+
+    backend emits a message in its response block; the orchestrator stores it and
+    injects it into frontend's next prompt. The agents never touch each other.
+    """
+    runtime = RecordingRuntime(
+        messages={
+            "T-1": [{"to": "frontend", "message": "Endpoint is now POST /api/v2/users"}]
+        }
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    first = tasks.create_task("backend work", agent="backend")
+    second = tasks.create_task("frontend work", agent="frontend", depends_on=[first.key])
+
+    await scheduler.run()
+
+    frontend_prompt = runtime.requests[1].prompt
+    assert "## INBOX" in frontend_prompt
+    assert "[backend]" in frontend_prompt
+    assert "POST /api/v2/users" in frontend_prompt
+    assert ("message", "backend sent 1 message(s)") in events
+    # Consumed exactly once.
+    assert not scheduler.messages.take_inbox("frontend")
+
+
+async def test_human_message_is_injected(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    scheduler.messages.send_from_human("backend", "Check the auth middleware")
+    tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+    assert "[human]" in runtime.requests[0].prompt
+    assert "Check the auth middleware" in runtime.requests[0].prompt
+
+
+async def test_failed_run_preserves_unread_message(db, tmp_path) -> None:
+    """A failed run must not consume the inbox."""
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    scheduler.messages.send_from_human("backend", "do not lose me")
+    tasks.create_task("doomed", agent="backend")
+
+    await scheduler.run()
+    still_unread = scheduler.messages.list_for("backend", unread_only=True)
+    assert [m.body for m in still_unread] == ["do not lose me"]
+
+
+async def test_message_redelivered_on_retry(db, tmp_path) -> None:
+    config = make_config(max_task_retries=1)
+    runtime = RecordingRuntime(fail_contains={"## TASK T-1"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    scheduler.messages.send_from_human("backend", "persistent note")
+    tasks.create_task("doomed", agent="backend")
+
+    await scheduler.run()
+    # Injected into both the original attempt and the retry.
+    assert sum("persistent note" in r.prompt for r in runtime.requests) == 2
+
+
+async def test_requested_task_is_created_and_scheduled(db, config, tmp_path) -> None:
+    """An agent asks for follow-up work; the orchestrator validates and runs it."""
+    runtime = RecordingRuntime(
+        requested={
+            "T-1": [
+                {
+                    "agent_role": "qa",
+                    "title": "Test the OAuth callback",
+                    "description": "Verify success and failure paths.",
+                }
+            ]
+        }
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    parent = tasks.create_task("backend work", agent="backend")
+
+    report = await scheduler.run()
+
+    spawned = [d for e, d in events if e == "spawned"]
+    assert spawned, "no follow-up task was created"
+    new_key = next(k for k in report.completed if k != parent.key)
+    created = tasks.get_task(new_key)
+    assert created.assigned_agent == "qa"
+    assert created.created_by == "backend"
+    assert parent.key in created.depends_on
+    # It ran after its parent, in the same scheduler session.
+    assert runtime.order == [parent.key, new_key]
+
+
+async def test_rejected_requested_task_is_reported_not_created(
+    db, config, tmp_path
+) -> None:
+    runtime = RecordingRuntime(
+        requested={"T-1": [{"agent_role": "astronaut", "title": "Fly to orbit"}]}
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    parent = tasks.create_task("work", agent="backend")
+
+    report = await scheduler.run()
+    assert report.completed == [parent.key]
+    assert tasks.tasks.count() == 1
+    assert any(e == "rejected" and "astronaut" in d for e, d in events)
+
+
+async def test_unparseable_response_triggers_one_repair(db, tmp_path) -> None:
+    """A malformed reply gets exactly one repair attempt, then is honoured."""
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(raw_text={"T-1": "I finished it, honestly."})
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+
+    assert any(e == "repair" for e, _ in events)
+    # Original attempt plus one repair turn; the repair prompt has no TASK header.
+    assert runtime.order == [task.key, "?"]
+
+
+async def test_repair_prompt_does_not_ask_for_more_work(db, tmp_path) -> None:
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(raw_text={"T-1": "no block here"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("work", agent="backend")
+    await scheduler.run()
+    repair_prompt = runtime.requests[1].prompt
+    assert "do NOT change any files" in repair_prompt
+
+
+async def test_unrepairable_response_fails_the_task(db, tmp_path) -> None:
+    """If the repair also fails to parse, the task fails rather than lying."""
+    config = make_config(max_task_retries=0)
+
+    class NeverParses(RecordingRuntime):
+        async def run(self, request, on_event=None):
+            self.requests.append(request)
+            self.order.append(self._label(request.prompt))
+            return RunResult(
+                status=RunStatus.SUCCEEDED,
+                session_id="s",
+                exit_code=0,
+                text="still no block",
+            )
+
+    scheduler, tasks, _ = build(db, config, NeverParses(), tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    report = await scheduler.run()
+    assert report.failed == [task.key]
+    assert "block" in (tasks.get_task(task.key).error or "").lower()
+
+
+async def test_agent_reported_blocked_fails_the_task(db, tmp_path) -> None:
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(
+        raw_text={
+            "T-1": response_block(status="blocked", blockers=["need db credentials"])
+        }
+    )
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    report = await scheduler.run()
+    assert report.failed == [task.key]
+    assert "credentials" in (tasks.get_task(task.key).error or "")
+
+
+async def test_summary_is_stored_as_task_result(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    await scheduler.run()
+    # The parsed summary, not the raw reply with its JSON block.
+    result = tasks.get_task(task.key).result or ""
+    assert result == f"did {task.key}"
+    assert RESPONSE_BEGIN not in result

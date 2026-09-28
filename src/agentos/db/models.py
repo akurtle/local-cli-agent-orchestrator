@@ -28,7 +28,14 @@ from sqlalchemy.orm import (
     relationship,
 )
 
-from agentos.schemas.enums import AgentStatus, MessageType, RunStatus, TaskStatus
+from agentos.schemas.enums import (
+    AgentStatus,
+    ObjectiveStatus,
+    MessageStatus,
+    MessageType,
+    RunStatus,
+    TaskStatus,
+)
 
 
 def utcnow() -> datetime:
@@ -69,6 +76,26 @@ class Agent(Base):
         return f"<Agent {self.name} role={self.role} status={self.status}>"
 
 
+class Objective(Base):
+    """A user goal that the manager decomposes into tasks."""
+
+    __tablename__ = "objectives"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(16), default=ObjectiveStatus.PLANNING.value, index=True
+    )
+    plan_json: Mapped[str | None] = mapped_column(Text, default=None)
+    """The manager's proposed plan, kept verbatim for auditing."""
+
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    def __repr__(self) -> str:
+        return f"<Objective {self.id} {self.status}>"
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -90,6 +117,9 @@ class Task(Base):
         ForeignKey("agents.id", ondelete="SET NULL"), default=None
     )
 
+    objective_id: Mapped[int | None] = mapped_column(
+        ForeignKey("objectives.id", ondelete="SET NULL"), default=None, index=True
+    )
     priority: Mapped[int] = mapped_column(Integer, default=100)
     acceptance_criteria: Mapped[str] = mapped_column(Text, default="")
     result: Mapped[str | None] = mapped_column(Text, default=None)
@@ -148,8 +178,11 @@ class Message(Base):
         String(16), default=MessageType.INFO.value
     )
     body: Mapped[str] = mapped_column(Text)
-    read: Mapped[bool] = mapped_column(default=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(16), default=MessageStatus.PENDING.value, index=True
+    )
     delivered_at: Mapped[datetime | None] = mapped_column(default=None)
+    read_at: Mapped[datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 

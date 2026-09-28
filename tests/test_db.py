@@ -59,12 +59,14 @@ def test_rollback_on_error_leaves_no_partial_write(db: Database) -> None:
         assert session.query(Task).count() == 0
 
 
-def test_message_defaults_unread(db: Database) -> None:
+def test_message_defaults_to_pending(db: Database) -> None:
     with db.session() as session:
         session.add(Message(sender_name="backend", body="endpoint moved"))
     with db.session() as session:
         message = session.query(Message).one()
-        assert message.read is False
+        assert message.status == "pending"
+        assert message.delivered_at is None
+        assert message.read_at is None
         assert message.message_type == "info"
 
 

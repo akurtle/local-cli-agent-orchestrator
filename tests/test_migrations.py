@@ -43,7 +43,7 @@ def test_missing_column_is_added_to_an_existing_database(tmp_path: Path) -> None
 
     reopened = Database(path)
     applied = reopened.create_all()
-    assert "agents.runtime" in applied
+    assert "+agents.runtime" in applied
     assert "runtime" in migrations.existing_columns(reopened.engine, "agents")
     assert reopened.schema_version == migrations.SCHEMA_VERSION
     reopened.dispose()
@@ -85,3 +85,44 @@ def test_add_column_statement_shape() -> None:
         change.statement
         == "ALTER TABLE agents ADD COLUMN runtime VARCHAR(32) DEFAULT 'claude'"
     )
+
+
+def test_indexed_column_can_be_dropped(tmp_path: Path) -> None:
+    """Regression: SQLite refuses to drop a column an index depends on.
+
+    The Phase 1 `messages.read` column was indexed, so the Phase 4 drop failed on
+    real databases with `error in index ix_messages_read after drop column`.
+    Test databases are built fresh from the current model and never had it.
+    """
+    path = tmp_path / "indexed.db"
+    db = Database(path)
+    db.create_all()
+
+    # Recreate the old shape: the dropped column, plus its index.
+    with db.engine.begin() as conn:
+        conn.execute(text("ALTER TABLE messages ADD COLUMN read BOOLEAN DEFAULT 0"))
+        conn.execute(text("CREATE INDEX ix_messages_read ON messages (read)"))
+        conn.execute(text("PRAGMA user_version = 0"))
+    assert "read" in migrations.existing_columns(db.engine, "messages")
+    assert migrations.indexes_on_column(db.engine, "messages", "read") == [
+        "ix_messages_read"
+    ]
+    db.dispose()
+
+    reopened = Database(path)
+    applied = reopened.create_all()
+    assert "-index ix_messages_read" in applied
+    assert "-messages.read" in applied
+    assert "read" not in migrations.existing_columns(reopened.engine, "messages")
+    reopened.dispose()
+
+
+def test_indexes_on_column_ignores_unrelated_indexes(tmp_path: Path) -> None:
+    db = Database(tmp_path / "idx.db")
+    db.create_all()
+    # messages.status is indexed by the model; the recipient index is separate.
+    assert "ix_messages_status" in migrations.indexes_on_column(
+        db.engine, "messages", "status"
+    )
+    assert migrations.indexes_on_column(db.engine, "messages", "body") == []
+    db.dispose()

@@ -80,6 +80,7 @@ class TaskService:
         prefix: str = "T",
         created_by: str | None = None,
         key: str | None = None,
+        objective_id: int | None = None,
     ) -> TaskView:
         """Create one task, validating its agent and dependencies first.
 
@@ -126,6 +127,7 @@ class TaskService:
             assigned_agent_id=assigned_agent_id,
             assigned_role=assigned_role,
             created_by_agent_id=creator_id,
+            objective_id=objective_id,
             priority=priority,
             acceptance_criteria=acceptance_criteria,
         )

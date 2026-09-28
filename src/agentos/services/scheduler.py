@@ -20,6 +20,8 @@ from agentos.schemas.dto import SchedulerReport, TaskView
 from agentos.schemas.enums import AgentStatus, TaskStatus
 from agentos.services import dag
 from agentos.services.agents import AgentBusy, AgentPaused, AgentService
+from agentos.services.messages import MessageService
+from agentos.services.results import ResultProcessor, build_repair_prompt
 from agentos.services.tasks import TaskService
 
 # Agent statuses that can accept a new task.
@@ -31,6 +33,10 @@ class SchedulerEvent:
 
     DISPATCH = "dispatch"
     COMPLETED = "completed"
+    MESSAGE = "message"
+    SPAWNED = "spawned"
+    REPAIR = "repair"
+    REJECTED = "rejected"
     FAILED = "failed"
     RETRY = "retry"
     BLOCKED = "blocked"
@@ -45,12 +51,18 @@ class Scheduler:
         config: Config,
         agent_service: AgentService,
         task_service: TaskService,
+        message_service: MessageService | None = None,
+        result_processor: ResultProcessor | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self.db = db
         self.config = config
         self.agents = agent_service
         self.tasks = task_service
+        self.messages = message_service or MessageService(db, config)
+        self.results = result_processor or ResultProcessor(
+            db, config, task_service, self.messages
+        )
         self.on_progress = on_progress
         self._stopping = False
 
@@ -97,10 +109,11 @@ class Scheduler:
 
     # ---------------------------------------------------------------- execution
 
-    def _build_prompt(self, task: TaskView) -> str:
+    def _build_prompt(self, task: TaskView, inbox) -> str:
         return build_task_prompt(
             task=task,
             dependencies=self.tasks.completed_dependencies(task),
+            inbox=inbox.items,
             retry_of=task.error if task.attempts else None,
         )
 
@@ -108,9 +121,13 @@ class Scheduler:
         self, task: TaskView
     ) -> tuple[TaskView, bool, str | None, str]:
         """Execute one task. Returns (task, ok, error, agent output text)."""
-        prompt = self._build_prompt(task)
         agent_name = task.assigned_agent
         assert agent_name is not None  # selection guarantees this
+
+        # Claim unread messages. They are marked delivered now and only
+        # confirmed read once this run finishes, so a crash cannot lose them.
+        inbox = await asyncio.to_thread(self.messages.take_inbox, agent_name)
+        prompt = self._build_prompt(task, inbox)
 
         try:
             outcome = await self.agents.run_agent(
@@ -118,20 +135,78 @@ class Scheduler:
             )
         except (AgentBusy, AgentPaused) as exc:
             # Lost a race for the agent: return the task to the queue untouched.
+            await asyncio.to_thread(self.messages.release, inbox)
             await asyncio.to_thread(
                 self.tasks.tasks.set_status, task.id, TaskStatus.READY
             )
             return task, False, f"agent unavailable: {exc}", ""
         except asyncio.CancelledError:
+            await asyncio.to_thread(self.messages.release, inbox)
             await asyncio.to_thread(
                 self.tasks.tasks.set_status, task.id, TaskStatus.READY
             )
             raise
         except Exception as exc:
+            await asyncio.to_thread(self.messages.release, inbox)
             return task, False, f"{type(exc).__name__}: {exc}", ""
 
-        error = outcome.error or (None if outcome.ok else "agent failed")
-        return task, outcome.ok, error, outcome.text
+        if not outcome.ok:
+            # The process itself failed, so the agent never really read anything.
+            await asyncio.to_thread(self.messages.release, inbox)
+            error = outcome.error or "agent failed"
+            return task, False, error, outcome.text
+
+        result = await self._apply_result(task, agent_name, outcome.text)
+
+        if result.treat_as_failure:
+            await asyncio.to_thread(self.messages.release, inbox)
+            reason = result.parse_error or (
+                "; ".join(result.blockers) or f"agent reported {result.status}"
+            )
+            return task, False, reason, outcome.text
+
+        # The run completed and its response was understood: the messages that
+        # went into this prompt are genuinely consumed.
+        await asyncio.to_thread(self.messages.confirm_read, inbox)
+        return task, True, None, result.summary or outcome.text
+
+    async def _apply_result(self, task: TaskView, agent_name: str, text: str):
+        """Validate the agent response and apply what it legitimately asks for.
+
+        One repair attempt is allowed for an unparseable reply; the repair prompt
+        asks only for the response block, never for more work.
+        """
+        result = await asyncio.to_thread(
+            self.results.process, text, task, agent_name
+        )
+
+        if not result.parsed:
+            self._notify(
+                SchedulerEvent.REPAIR, f"{task.key}: {result.parse_error}"
+            )
+            try:
+                repair = await self.agents.run_agent(
+                    agent_name,
+                    build_repair_prompt(text, result.parse_error or "unknown"),
+                    task_id=task.id,
+                )
+            except Exception:
+                return result
+            if repair.ok:
+                result = await asyncio.to_thread(
+                    self.results.process, repair.text, task, agent_name, True
+                )
+
+        for key in result.tasks_created:
+            self._notify(SchedulerEvent.SPAWNED, f"{agent_name} requested {key}")
+        if result.messages_sent:
+            self._notify(
+                SchedulerEvent.MESSAGE,
+                f"{agent_name} sent {result.messages_sent} message(s)",
+            )
+        for reason in result.rejected:
+            self._notify(SchedulerEvent.REJECTED, f"{task.key}: {reason}")
+        return result
 
     async def _settle(self, task: TaskView, ok: bool, error: str | None, text: str = "") -> str:
         """Record the outcome of a finished task and return the event name."""

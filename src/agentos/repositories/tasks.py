@@ -78,6 +78,7 @@ class TaskRepository:
             assigned_role=row.assigned_role,
             created_by_agent_id=row.created_by_agent_id,
             created_by=creator_name,
+            objective_id=row.objective_id,
             priority=row.priority,
             acceptance_criteria=criteria_from_text(row.acceptance_criteria),
             depends_on=sorted(dep_keys),
@@ -186,6 +187,7 @@ class TaskRepository:
         assigned_agent_id: int | None = None,
         assigned_role: str | None = None,
         created_by_agent_id: int | None = None,
+        objective_id: int | None = None,
         priority: int = 100,
         acceptance_criteria: list[str] | None = None,
         status: TaskStatus = TaskStatus.PENDING,
@@ -199,6 +201,7 @@ class TaskRepository:
                 assigned_agent_id=assigned_agent_id,
                 assigned_role=assigned_role,
                 created_by_agent_id=created_by_agent_id,
+                objective_id=objective_id,
                 priority=priority,
                 acceptance_criteria=criteria_to_text(acceptance_criteria),
             )

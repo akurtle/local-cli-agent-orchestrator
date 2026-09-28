@@ -21,6 +21,10 @@ from agentos import __version__
 from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
 from agentos.cli.agent_commands import agent_app, list_agents_command
 from agentos.cli.context import load_context
+from agentos.cli.message_commands import (
+    list_messages_command,
+    send_message_command,
+)
 from agentos.cli.task_commands import (
     list_tasks_command,
     task_app,
@@ -60,6 +64,31 @@ def tasks(
 ) -> None:
     """List tasks with their status, agent and dependencies."""
     list_tasks_command(status=status)
+
+
+@app.command("messages")
+def messages(
+    agent: Annotated[
+        str | None, typer.Argument(help="Show only this agent's inbox.")
+    ] = None,
+    unread: Annotated[
+        bool, typer.Option("--unread", help="Only messages not yet consumed.")
+    ] = False,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", help="Show only the newest N.")
+    ] = None,
+) -> None:
+    """Show messages on the bus."""
+    list_messages_command(agent=agent, unread=unread, limit=limit)
+
+
+@app.command("message")
+def message(
+    agent: Annotated[str, typer.Argument(help="Recipient agent name.")],
+    body: Annotated[str, typer.Argument(help="What to tell them.")],
+) -> None:
+    """Send a message to an agent, delivered on its next invocation."""
+    send_message_command(agent, body)
 
 
 @app.command("work")

@@ -9,9 +9,9 @@ case that actually occurs in practice: adding a column. Each entry is checked
 against `PRAGMA table_info` and applied only if missing, which makes this
 idempotent and safe on both fresh and old databases.
 
-Anything beyond adding a column (dropping, renaming, changing a type, adding a
-constraint) is NOT handled here. If that becomes necessary, add Alembic rather
-than growing this file into a half-migration-tool.
+Adding and dropping a column are handled. Renaming, changing a type and adding
+a constraint are NOT. If those become necessary, add Alembic rather than growing
+this file into a half-migration-tool.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Engine, text
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -37,10 +37,37 @@ class AddColumn:
         return f"ALTER TABLE {self.table} ADD COLUMN {self.column} {self.ddl}"
 
 
-# Columns added after the initial schema, oldest first.
+@dataclass(frozen=True)
+class DropColumn:
+    """Remove a column that is no longer part of the model.
+
+    Requires SQLite 3.35+. Only used to retire a column whose meaning has been
+    replaced, so no data worth keeping is lost.
+    """
+
+    table: str
+    column: str
+
+    @property
+    def statement(self) -> str:
+        return f"ALTER TABLE {self.table} DROP COLUMN {self.column}"
+
+
+# Schema changes after the initial version, oldest first.
 ADDITIVE_COLUMNS: tuple[AddColumn, ...] = (
     # Phase 2: per-agent runtime, so different agents could use different CLIs.
     AddColumn("agents", "runtime", "VARCHAR(32) DEFAULT 'claude'"),
+    # Phase 4: a three-state delivery lifecycle replaces the read boolean, so a
+    # crash between injecting a message and finishing the run cannot lose it.
+    AddColumn("messages", "status", "VARCHAR(16) DEFAULT 'pending'"),
+    AddColumn("messages", "read_at", "DATETIME"),
+    # Phase 5: tasks belong to an objective.
+    AddColumn("tasks", "objective_id", "INTEGER REFERENCES objectives(id)"),
+)
+
+DROPPED_COLUMNS: tuple[DropColumn, ...] = (
+    # Phase 4: superseded by messages.status.
+    DropColumn("messages", "read"),
 )
 
 
@@ -48,6 +75,27 @@ def existing_columns(engine: Engine, table: str) -> set[str]:
     with engine.connect() as conn:
         rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
     return {row[1] for row in rows}
+
+
+def indexes_on_column(engine: Engine, table: str, column: str) -> list[str]:
+    """Index names on `table` that reference `column`.
+
+    SQLite refuses to drop a column an index depends on, so these must go first.
+    """
+    found: list[str] = []
+    with engine.connect() as conn:
+        names = conn.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name=:t AND name NOT LIKE 'sqlite_%'"
+            ),
+            {"t": table},
+        ).fetchall()
+        for (name,) in names:
+            info = conn.execute(text(f"PRAGMA index_info({name})")).fetchall()
+            if any(row[2] == column for row in info):
+                found.append(name)
+    return found
 
 
 def table_exists(engine: Engine, table: str) -> bool:
@@ -69,7 +117,21 @@ def apply(engine: Engine) -> list[str]:
             continue
         with engine.begin() as conn:
             conn.execute(text(change.statement))
-        applied.append(f"{change.table}.{change.column}")
+        applied.append(f"+{change.table}.{change.column}")
+
+    for removal in DROPPED_COLUMNS:
+        if not table_exists(engine, removal.table):
+            continue
+        if removal.column not in existing_columns(engine, removal.table):
+            continue
+        # Drop dependent indexes first, or SQLite rejects the column drop.
+        for index_name in indexes_on_column(engine, removal.table, removal.column):
+            with engine.begin() as conn:
+                conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+            applied.append(f"-index {index_name}")
+        with engine.begin() as conn:
+            conn.execute(text(removal.statement))
+        applied.append(f"-{removal.table}.{removal.column}")
 
     with engine.begin() as conn:
         conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION}"))

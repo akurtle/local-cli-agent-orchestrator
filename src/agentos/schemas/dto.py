@@ -11,7 +11,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentos.schemas.enums import AgentStatus, TaskStatus
+from agentos.schemas.enums import (
+    AgentStatus,
+    MessageStatus,
+    MessageType,
+    ObjectiveStatus,
+    TaskStatus,
+)
 
 
 class AgentView(BaseModel):
@@ -76,6 +82,7 @@ class TaskView(BaseModel):
     assigned_role: str | None = None
     created_by_agent_id: int | None = None
     created_by: str | None = None
+    objective_id: int | None = None
     priority: int = 100
     acceptance_criteria: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
@@ -117,3 +124,61 @@ class SchedulerReport(BaseModel):
     @property
     def ok(self) -> bool:
         return not self.failed and not self.blocked
+
+
+class MessageView(BaseModel):
+    """A snapshot of one message."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    sender: str
+    recipient: str | None = None
+    task_key: str | None = None
+    message_type: MessageType = MessageType.INFO
+    body: str
+    status: MessageStatus = MessageStatus.PENDING
+    created_at: datetime | None = None
+    delivered_at: datetime | None = None
+    read_at: datetime | None = None
+
+    @property
+    def is_unread(self) -> bool:
+        return self.status is not MessageStatus.READ
+
+
+class ObjectiveView(BaseModel):
+    """A snapshot of one objective."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    description: str
+    status: ObjectiveStatus = ObjectiveStatus.PLANNING
+    task_keys: list[str] = Field(default_factory=list)
+    created_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class ResultOutcome(BaseModel):
+    """What the orchestrator did with one agent response."""
+
+    model_config = ConfigDict(frozen=True)
+
+    parsed: bool = False
+    status: str = ""
+    summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    messages_sent: int = 0
+    tasks_created: list[str] = Field(default_factory=list)
+    rejected: list[str] = Field(default_factory=list)
+    """Messages or tasks the orchestrator refused, with the reason."""
+    parse_error: str | None = None
+    repaired: bool = False
+    """True when a malformed response was fixed by a single repair retry."""
+
+    @property
+    def treat_as_failure(self) -> bool:
+        """A response we could not parse, or one the agent itself called failed."""
+        return not self.parsed or self.status in {"failed", "blocked"}

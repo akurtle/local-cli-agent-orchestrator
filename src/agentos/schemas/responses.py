@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentos.schemas.enums import MessageType
 
@@ -42,17 +42,25 @@ class OutboundMessage(BaseModel):
 class RequestedTask(BaseModel):
     """Work an agent wants queued for somebody else.
 
-    The scheduler validates the role and dependencies before accepting this;
-    an agent cannot conjure a task for a role that does not exist.
+    An agent may name either a specific agent or a role. Either way the
+    orchestrator resolves it against the real roster and rejects anything that
+    does not exist; an agent cannot conjure a worker into being.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    agent_role: str = Field(min_length=1, max_length=64)
+    agent_name: str | None = Field(default=None, max_length=64)
+    agent_role: str | None = Field(default=None, max_length=64)
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=20000)
     acceptance_criteria: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _needs_a_recipient(self) -> "RequestedTask":
+        if not (self.agent_name or self.agent_role):
+            raise ValueError("requested task must name an agent_name or agent_role")
+        return self
 
 
 class AgentResponse(BaseModel):
