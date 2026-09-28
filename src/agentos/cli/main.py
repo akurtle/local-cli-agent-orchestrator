@@ -21,6 +21,11 @@ from agentos import __version__
 from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
 from agentos.cli.agent_commands import agent_app, list_agents_command
 from agentos.cli.context import load_context
+from agentos.cli.task_commands import (
+    list_tasks_command,
+    task_app,
+    work_command,
+)
 from agentos.config import default_config_yaml
 from agentos.db.models import Run
 from agentos.paths import ProjectPaths
@@ -38,12 +43,40 @@ app = typer.Typer(
 console = Console()
 
 app.add_typer(agent_app)
+app.add_typer(task_app)
 
 
 @app.command("agents")
 def agents() -> None:
     """List all agents with their role, status and session."""
     list_agents_command()
+
+
+@app.command("tasks")
+def tasks(
+    status: Annotated[
+        str | None, typer.Option("--status", "-s", help="Filter by task status.")
+    ] = None,
+) -> None:
+    """List tasks with their status, agent and dependencies."""
+    list_tasks_command(status=status)
+
+
+@app.command("work")
+def work(
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Exercise scheduling without launching agents or spending usage.",
+        ),
+    ] = False,
+    max_passes: Annotated[
+        int, typer.Option("--max-passes", help="Safety ceiling on scheduler passes.")
+    ] = 1000,
+) -> None:
+    """Run ready tasks, respecting dependencies and concurrency limits."""
+    work_command(dry_run=dry_run, max_passes=max_passes)
 
 
 def _run_async(coro):

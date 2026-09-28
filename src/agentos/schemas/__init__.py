@@ -1,4 +1,9 @@
-from agentos.schemas.dto import AgentRunOutcome, AgentView
+from agentos.schemas.dto import (
+    AgentRunOutcome,
+    AgentView,
+    SchedulerReport,
+    TaskView,
+)
 from agentos.schemas.enums import (
     AgentStatus,
     MessageType,
@@ -11,6 +16,8 @@ from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
 __all__ = [
     "AgentRunOutcome",
     "AgentView",
+    "SchedulerReport",
+    "TaskView",
     "AgentStatus",
     "MessageType",
     "RunStatus",

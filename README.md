@@ -15,17 +15,17 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 2 complete
+## Status: Phase 3 complete
 
-Persistent agents with independent Claude sessions. No scheduler or task system
-yet -- agents are invoked one at a time by hand.
+Tasks, dependency-aware scheduling and concurrent execution. Messaging and the
+manager agent are not built yet, so task graphs are still authored by hand.
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Foundation, runtime adapter, CLI | **done** |
 | 2 | Persistent agents, role prompts, sessions | **done** |
-| 3 | Tasks, dependencies, scheduler | next |
-| 4 | Messaging, inboxes, structured responses | |
+| 3 | Tasks, dependencies, scheduler | **done** |
+| 4 | Messaging, inboxes, structured responses | next |
 | 5 | Manager agent planning | |
 | 6 | Git worktree isolation | |
 | 7 | Rich dashboard | |
@@ -41,7 +41,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 109 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 228 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -90,6 +90,43 @@ changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
 
+### Scheduling decisions are pure functions
+`services/dag.py` holds readiness, cycle detection and dispatch selection as
+functions over frozen dataclasses -- no database, no asyncio, no Claude. That is
+the part which must be exactly right, so it is testable exhaustively and in
+milliseconds (48 tests, 0.06s). `services/scheduler.py` only loads rows, calls
+those functions, runs agents and persists what they decide.
+
+### Readiness is derived, never assumed
+Statuses are recomputed from the graph on every pass: a dependency that failed or
+was cancelled blocks its dependents; all dependencies complete means ready. A
+task already marked `ready` regresses to `blocked` if a prerequisite later dies,
+and a blocked task recovers if that prerequisite is retried successfully. A
+dangling dependency edge blocks rather than letting the task run.
+
+### Cycles are refused at write time
+`would_create_cycle` runs before an edge is persisted, so a cycle never reaches
+the database. `validate_graph` re-checks the whole graph when the scheduler
+starts, as a safety net against a hand-edited database, and raises rather than
+spinning. Cycle detection is iterative, so a 3000-deep chain does not blow the
+recursion limit.
+
+### The loop does not busy-wait
+Each pass dispatches what it can, then blocks on
+`asyncio.wait(FIRST_COMPLETED)`. When ready work exists but no agent can take it,
+the scheduler stops and says which tasks were skipped instead of polling forever.
+
+### Crash recovery
+Nothing is running when the scheduler starts, so any task still marked `running`
+is stale by definition. It is returned to the queue rather than failed, since the
+work may never have begun, and its retry count is left untouched so a genuine
+crash loop still hits the ceiling.
+
+### Dry run costs nothing
+`runtime/dry_run.py` satisfies the same `AgentRuntime` protocol and launches no
+process, so `agentctl work --dry-run` validates a whole task graph's scheduling
+for free. The scheduler contains no test-only branch.
+
 ### Agents: config owns definitions, the database owns state
 `sync_from_config` refreshes an agent's role, description and model from YAML on
 every run, but never touches its `status` or `session_id`. Editing the config
@@ -137,7 +174,11 @@ src/agentos/
   prompts/           role briefs + generated response contract
   repositories/      all agent SQL; returns DTOs, never ORM rows
   services/agents.py agent lifecycle, sessions, state transitions
+  services/dag.py    PURE scheduling logic: readiness, cycles, dispatch order
+  services/tasks.py  task creation, validation, status transitions
+  services/scheduler.py  async dispatch loop over dag.py decisions
   services/runs.py   run persistence
+  runtime/dry_run.py no-op runtime for free scheduling dry runs
   db/migrations.py   additive column migrations
   cli/main.py        agentctl
   cli/glyphs.py      ASCII fallback for legacy Windows consoles
