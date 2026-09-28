@@ -323,3 +323,38 @@ class Denial(Base):
 
     def __repr__(self) -> str:
         return f"<Denial {self.agent} {self.capability}>"
+
+
+class CommandRun(Base):
+    """Every command an agent asked to run, including the refused ones.
+
+    Refusals are recorded too: knowing what an agent tried to do is as useful as
+    knowing what it did.
+    """
+
+    __tablename__ = "command_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent: Mapped[str] = mapped_column(String(64), index=True)
+    task_key: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+
+    executable: Mapped[str] = mapped_column(String(200))
+    arguments: Mapped[str] = mapped_column(Text, default="")
+    """JSON-encoded argv tail. Stored for audit, never re-executed as a string."""
+    cwd: Mapped[str] = mapped_column(Text, default="")
+
+    verdict: Mapped[str] = mapped_column(String(16), default="allowed", index=True)
+    denied_reason: Mapped[str] = mapped_column(Text, default="")
+    exit_code: Mapped[int | None] = mapped_column(Integer, default=None)
+    stdout: Mapped[str] = mapped_column(Text, default="")
+    stderr: Mapped[str] = mapped_column(Text, default="")
+    timed_out: Mapped[bool] = mapped_column(default=False)
+
+    approval_required: Mapped[bool] = mapped_column(default=False)
+    approved_by: Mapped[str | None] = mapped_column(String(64), default=None)
+
+    started_at: Mapped[datetime] = mapped_column(default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    def __repr__(self) -> str:
+        return f"<CommandRun {self.executable} {self.verdict}>"

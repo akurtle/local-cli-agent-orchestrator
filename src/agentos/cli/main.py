@@ -30,6 +30,11 @@ from agentos.cli.context_commands import (
     list_memory_command,
     memory_app,
 )
+from agentos.cli.command_commands import (
+    check_command,
+    list_approvals_command,
+    list_commands_command,
+)
 from agentos.cli.git_commands import diff_command, git_app
 from agentos.cli.permission_commands import (
     list_permissions_command,
@@ -150,6 +155,42 @@ def permissions(
 ) -> None:
     """Show what each agent is allowed to do."""
     list_permissions_command(agent=agent)
+
+
+@app.command("commands")
+def commands(
+    agent: Annotated[
+        str | None, typer.Argument(help="Show only this agent's commands.")
+    ] = None,
+    verdict: Annotated[
+        str | None,
+        typer.Option("--verdict", help="allowed, denied or needs_approval."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 30,
+) -> None:
+    """Show commands agents ran, including the ones that were refused."""
+    list_commands_command(agent=agent, verdict=verdict, limit=limit)
+
+
+# ignore_unknown_options so a command containing flags can be checked at all:
+# without it, `command-check git reset --hard` is parsed as our own options.
+@app.command(
+    "command-check",
+    context_settings={"ignore_unknown_options": True},
+)
+def command_check(
+    argv: Annotated[
+        list[str], typer.Argument(help="The command to test, e.g. git reset --hard.")
+    ],
+) -> None:
+    """Show what the policy would do with a command, without running it."""
+    check_command(list(argv))
+
+
+@app.command("approvals")
+def approvals() -> None:
+    """Show commands waiting for human approval."""
+    list_approvals_command()
 
 
 @app.command("logs")

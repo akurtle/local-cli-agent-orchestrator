@@ -48,6 +48,37 @@ class RuntimeSection(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class CommandsSection(BaseModel):
+    """Which development commands agents may run.
+
+    An allowlist of executables, matched on the program name only. This is not a
+    sandbox -- string rules cannot make arbitrary code safe -- it stops an agent
+    running something the operator never sanctioned.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: list[str] = Field(
+        default_factory=lambda: [
+            "pytest", "python", "npm", "pnpm", "yarn", "node",
+            "git", "ruff", "mypy", "black", "eslint", "tsc",
+        ]
+    )
+    denied: list[str] = Field(
+        default_factory=lambda: [
+            "powershell", "pwsh", "cmd", "bash", "sh", "zsh",
+            "ssh", "scp", "curl", "wget", "rm", "del",
+        ]
+    )
+    require_approval: list[str] = Field(
+        default_factory=lambda: [
+            "git push", "git reset", "git clean", "git rebase",
+            "npm publish", "pnpm publish",
+        ]
+    )
+    timeout_seconds: float = Field(default=300.0, gt=0)
+
+
 class ContextSection(BaseModel):
     """How much history an agent carries, and when its session is replaced.
 
@@ -105,6 +136,7 @@ class Config(BaseModel):
     runtime: RuntimeSection = Field(default_factory=RuntimeSection)
     approvals: ApprovalsSection = Field(default_factory=ApprovalsSection)
     context: ContextSection = Field(default_factory=ContextSection)
+    commands: CommandsSection = Field(default_factory=CommandsSection)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
 
     @field_validator("runtime", mode="before")
@@ -183,6 +215,15 @@ orchestrator:
 # agents:
 #   reviewer:
 #     capabilities: [read_files, run_tests, git_diff, message_agent]
+
+# Which development commands agents may run. Defaults cover the usual test and
+# lint tooling; shells and network tools are denied, and history-rewriting git
+# commands need approval. See services/commands.py.
+#
+# commands:
+#   allowed: [pytest, python, npm, git, ruff, mypy]
+#   denied: [powershell, cmd, bash, ssh]
+#   require_approval: ["git push", "git reset", "git clean"]
 
 # How much context an agent carries between tasks.
 context:

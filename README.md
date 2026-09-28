@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: phase 14 complete (of an ongoing production-hardening series)
+## Status: phase 15 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -38,6 +38,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 12 | Textual TUI | **done** |
 | 13 | Context and memory management | **done** |
 | 14 | Capabilities and permissions | **done** |
+| 15 | Safe command execution | **done** |
 
 ## Install
 
@@ -64,13 +65,16 @@ agentctl memories | memory add|forget       what the orchestrator remembers
 agentctl memory handoffs                    packets passed between agents
 agentctl permissions [agent]                what each agent may do
 agentctl permission grant|revoke|denials    adjust and audit permissions
+agentctl commands [agent] [--verdict]       what agents ran, including refusals
+agentctl command-check <cmd...>             what the policy would do
+agentctl approvals                          commands waiting for a human
 agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 647 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 695 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -182,6 +186,23 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Command execution is restricted, not sandboxed
+Agents can run development commands through one service, which refuses anything
+the operator did not sanction and records everything attempted. In priority order:
+an allowlist of **executables** (matched on the program name only), argument
+arrays with no `shell=True`, a resolved working directory inside the agent's own
+worktree, a timeout with process-tree kill, a capability check, and explicit
+approval for risky argument patterns.
+
+It is deliberately **not** a security sandbox. String matching cannot make
+arbitrary code safe, and pretending otherwise would be worse than useless.
+
+Two details that matter: program names are normalised (`pytest`, `pytest.exe` and
+an absolute path all compare equal, or the allowlist is trivially bypassed on
+Windows), and `denied` beats `allowed`, because listing something in both is a
+mistake and refusing is the safe reading. `run_tests` is a narrower privilege than
+`run_command`, so a reviewer can run the suite without being able to run anything.
 
 ### Capabilities are enforced in code, in three layers
 A prompt saying "do not edit files" is guidance. A reviewer without `edit_files`
@@ -429,6 +450,8 @@ src/agentos/
   services/rotation.py    PURE session rotation policy
   schemas/capabilities.py PURE capability model and tool denylist
   services/permissions.py grants, enforcement and the denial trail
+  services/commands.py    PURE command policy + the only agent-facing spawner
+  services/command_service.py  capability check, run, record
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

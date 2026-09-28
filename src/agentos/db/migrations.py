@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Engine, text
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
