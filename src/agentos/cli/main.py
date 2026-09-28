@@ -26,6 +26,7 @@ from agentos.cli.agent_commands import (
 )
 from agentos.cli.context import load_context
 from agentos.cli.git_commands import diff_command, git_app
+from agentos.cli.integrate_commands import integrate_command
 from agentos.cli.run_commands import (
     list_objectives_command,
     run_objective_command,
@@ -182,6 +183,38 @@ def diff(
 ) -> None:
     """Show what an agent changed in its worktree."""
     diff_command(agent, name_only=name_only, stat=stat)
+
+
+@app.command("integrate")
+def integrate(
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually merge. Without it, only reports."),
+    ] = False,
+    base: Annotated[
+        str | None, typer.Option("--base", help="Branch to integrate into.")
+    ] = None,
+    agent: Annotated[
+        list[str] | None,
+        typer.Option("--agent", help="Limit to these agents (repeatable)."),
+    ] = None,
+    resolver: Annotated[
+        str | None,
+        typer.Option("--resolver", help="Agent to assign conflict resolution to."),
+    ] = None,
+    no_tasks: Annotated[
+        bool,
+        typer.Option("--no-tasks", help="Do not create resolution tasks."),
+    ] = False,
+) -> None:
+    """Inspect agent branches and merge the ones that merge cleanly."""
+    integrate_command(
+        apply=apply,
+        base=base,
+        agent=agent,
+        resolver=resolver,
+        no_tasks=no_tasks,
+    )
 
 
 @app.command("messages")

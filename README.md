@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 9 complete
+## Status: Phase 10 complete
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -32,8 +32,9 @@ follow-up work.
 | 7 | Orchestration loop hardening | **done** |
 | 8 | Rich dashboard | **done** |
 | 9 | Configurable agent definitions | **done** |
-| 10 | Integrator agent | next |
-| 11-12 | Approval gates, TUI | |
+| 10 | Integrator | **done** |
+| 11 | Approval gates | next |
+| 12 | Textual TUI | |
 
 ## Install
 
@@ -45,7 +46,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 458 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 481 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -157,6 +158,23 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Integration detects, it does not guess
+`agentctl integrate` reports by default and merges only with `--apply`. It works
+on a dedicated `integration/...` branch built fresh from the base, so the
+operator's checkout is never modified and abandoning the attempt costs nothing. A
+conflicting merge is aborted, leaving no half-merged files, and the agent's branch
+keeps its work.
+
+Conflict *resolution* is deliberately not automated: a conflict means two agents
+disagreed about the same lines, and picking a winner mechanically is how work gets
+lost. The orchestrator files a task for somebody to decide, with acceptance
+criteria that include not discarding the other branch's changes.
+
+Branches are checked against the base individually, so two that each merge
+cleanly can still conflict with each other once the first lands. Overlapping files
+are flagged up front, and if that sequential conflict does happen the second
+branch gets a resolution task exactly like a predicted one.
 
 ### Nothing merges automatically
 `GitManager` can detect a conflict with `merge-tree` without touching the working
@@ -289,6 +307,7 @@ src/agentos/
   runtime/dry_run.py no-op runtime for free scheduling dry runs
   vcs/manager.py     the only module that runs git; argv arrays, never a shell
   services/workspaces.py  where each agent works; verifies claims against git
+  services/integration.py agent branch inspection and conservative merging
   db/migrations.py   additive column migrations
   cli/main.py        agentctl
   cli/glyphs.py      ASCII fallback for legacy Windows consoles
