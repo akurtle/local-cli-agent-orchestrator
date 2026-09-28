@@ -164,6 +164,7 @@ class TaskService:
         to: TaskStatus,
         result: str | None = None,
         error: str | None = None,
+        needs_intervention: bool | None = None,
     ) -> TaskView:
         """Move a task to a new status, refusing illegal moves."""
         task = self.tasks.get(key_or_id)
@@ -181,6 +182,7 @@ class TaskService:
             error=error,
             touch_started=to is TaskStatus.RUNNING,
             touch_completed=to.is_terminal,
+            needs_intervention=needs_intervention,
         )
 
     def cancel(self, key_or_id: str | int) -> TaskView:
@@ -201,7 +203,22 @@ class TaskService:
             raise InvalidTaskTransition(
                 f"{task.key} is {task.status.value}, only failed tasks can be retried"
             )
-        self.tasks.set_status(key_or_id, TaskStatus.PENDING, error="")
+        # Clearing the flag is the point of a retry: the operator is saying the
+        # blocker has been dealt with.
+        self.tasks.set_status(
+            key_or_id, TaskStatus.PENDING, error="", needs_intervention=False
+        )
+        self.refresh_readiness()
+        return self.tasks.get(key_or_id)
+
+    def unblock(self, key_or_id: str | int) -> TaskView:
+        """Clear an agent-reported blocker so the task can be scheduled again."""
+        task = self.tasks.get(key_or_id)
+        if not task.needs_intervention and task.status is not TaskStatus.BLOCKED:
+            raise InvalidTaskTransition(f"{task.key} is not blocked")
+        self.tasks.set_status(
+            key_or_id, TaskStatus.PENDING, error="", needs_intervention=False
+        )
         self.refresh_readiness()
         return self.tasks.get(key_or_id)
 

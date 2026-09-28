@@ -48,6 +48,37 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class FailureKind(StrEnum):
+    """Why a task attempt did not succeed.
+
+    The orchestrator treats these differently: infrastructure problems are worth
+    retrying, an agent reporting `blocked` is not -- retrying it would just
+    reproduce the same blocker and burn usage.
+    """
+
+    LAUNCH = "launch"
+    """The agent process could not be started at all."""
+    TIMEOUT = "timeout"
+    """The process ran too long and was killed."""
+    AGENT_FAILED = "agent_failed"
+    """The agent ran and reported that it failed."""
+    UNPARSEABLE = "unparseable"
+    """The agent ran but never produced a usable response block."""
+    BLOCKED = "blocked"
+    """The agent cannot proceed and needs intervention."""
+    UNAVAILABLE = "unavailable"
+    """The assigned agent was busy or paused; not the task's fault."""
+
+    @property
+    def is_infrastructure(self) -> bool:
+        return self in {FailureKind.LAUNCH, FailureKind.TIMEOUT}
+
+    @property
+    def is_retryable(self) -> bool:
+        """A blocker needs a human or the manager, not another attempt."""
+        return self is not FailureKind.BLOCKED
+
+
 class ObjectiveStatus(StrEnum):
     PLANNING = "planning"
     AWAITING_APPROVAL = "awaiting_approval"

@@ -43,6 +43,8 @@ class TaskNode:
     agent_name: str | None = None
     sequence: int = 0
     """Tie-breaker for deterministic ordering, normally the row id."""
+    needs_intervention: bool = False
+    """An agent reported a blocker. Readiness must leave this task alone."""
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,11 @@ def compute_readiness(nodes: dict[int, TaskNode]) -> list[Readiness]:
     for task_id in sorted(nodes):
         node = nodes[task_id]
         if node.status not in RECOMPUTABLE:
+            continue
+        if node.needs_intervention:
+            # An agent said it cannot proceed. Its dependencies may all be
+            # complete, so recomputing would helpfully mark it ready again and
+            # send it straight back into the same wall.
             continue
 
         dead: list[str] = []

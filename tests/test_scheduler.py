@@ -14,7 +14,7 @@ import pytest
 from agentos.config import Config
 from agentos.db.session import Database
 from agentos.runtime.dry_run import DryRunRuntime
-from agentos.schemas.enums import AgentStatus, RunStatus, TaskStatus
+from agentos.schemas.enums import AgentStatus, FailureKind, RunStatus, TaskStatus
 from agentos.schemas.responses import RESPONSE_BEGIN, RESPONSE_END
 from agentos.schemas.runtime import RunRequest, RunResult
 from agentos.services.agents import AgentService
@@ -711,8 +711,12 @@ async def test_unrepairable_response_fails_the_task(db, tmp_path) -> None:
     assert "block" in (tasks.get_task(task.key).error or "").lower()
 
 
-async def test_agent_reported_blocked_fails_the_task(db, tmp_path) -> None:
-    config = make_config(max_task_retries=0)
+async def test_agent_reported_blocked_is_not_retried(db, tmp_path) -> None:
+    """A blocker needs intervention. Retrying would hit the same wall and cost more.
+
+    Note max_task_retries=2 here: the point is that retries are NOT consumed.
+    """
+    config = make_config(max_task_retries=2)
     runtime = RecordingRuntime(
         raw_text={
             "T-1": response_block(status="blocked", blockers=["need db credentials"])
@@ -721,8 +725,15 @@ async def test_agent_reported_blocked_fails_the_task(db, tmp_path) -> None:
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     task = tasks.create_task("work", agent="backend")
     report = await scheduler.run()
-    assert report.failed == [task.key]
-    assert "credentials" in (tasks.get_task(task.key).error or "")
+
+    stored = tasks.get_task(task.key)
+    assert stored.status is TaskStatus.BLOCKED
+    assert stored.needs_intervention
+    assert "credentials" in (stored.error or "")
+    assert task.key in report.blocked
+    assert report.failed == []
+    # Ran exactly once despite two retries being allowed.
+    assert runtime.order.count(task.key) == 1
 
 
 async def test_summary_is_stored_as_task_result(db, config, tmp_path) -> None:
@@ -734,3 +745,197 @@ async def test_summary_is_stored_as_task_result(db, config, tmp_path) -> None:
     result = tasks.get_task(task.key).result or ""
     assert result == f"did {task.key}"
     assert RESPONSE_BEGIN not in result
+
+
+# ------------------------------------------- phase 7: failure classification
+
+
+def test_classify_timeout() -> None:
+    from agentos.schemas.dto import AgentRunOutcome
+    from agentos.services.scheduler import classify_run_failure
+
+    class Fake:
+        error = "run exceeded timeout of 30s"
+        text = ""
+
+    assert classify_run_failure(Fake()) is FailureKind.TIMEOUT
+
+
+def test_classify_spawn_failure() -> None:
+    from agentos.services.scheduler import classify_run_failure
+
+    class Fake:
+        error = "failed to spawn claude.exe"
+        text = ""
+
+    assert classify_run_failure(Fake()) is FailureKind.LAUNCH
+
+
+def test_unknown_process_failure_defaults_to_retryable() -> None:
+    """Giving up silently on a transient error would be worse than one retry."""
+    from agentos.services.scheduler import classify_run_failure
+
+    class Fake:
+        error = "exited with code 1"
+        text = ""
+
+    kind = classify_run_failure(Fake())
+    assert kind.is_retryable
+
+
+def test_classify_result_kinds() -> None:
+    from agentos.schemas.dto import ResultOutcome
+    from agentos.services.scheduler import classify_result
+
+    assert (
+        classify_result(ResultOutcome(parsed=False)) is FailureKind.UNPARSEABLE
+    )
+    assert (
+        classify_result(ResultOutcome(parsed=True, status="blocked"))
+        is FailureKind.BLOCKED
+    )
+    assert (
+        classify_result(
+            ResultOutcome(parsed=True, status="completed", blockers=["x"])
+        )
+        is FailureKind.BLOCKED
+    )
+    assert (
+        classify_result(ResultOutcome(parsed=True, status="failed"))
+        is FailureKind.AGENT_FAILED
+    )
+
+
+async def test_blocked_task_stays_blocked_across_passes(db, tmp_path) -> None:
+    """Readiness must not helpfully un-block an agent-reported blocker."""
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(
+        raw_text={"T-1": response_block(status="blocked", blockers=["needs a key"])}
+    )
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    await scheduler.run()
+
+    # The task has no dependencies, so a naive recompute would call it ready.
+    tasks.refresh_readiness()
+    assert tasks.get_task(task.key).status is TaskStatus.BLOCKED
+
+    second = await scheduler.run()
+    assert second.dispatched == 0
+    assert runtime.order.count(task.key) == 1
+
+
+async def test_unblock_returns_the_task_to_the_queue(db, tmp_path) -> None:
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(
+        raw_text={"T-1": response_block(status="blocked", blockers=["needs a key"])}
+    )
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    await scheduler.run()
+
+    # The operator deals with the blocker and clears it.
+    tasks.unblock(task.key)
+    stored = tasks.get_task(task.key)
+    assert not stored.needs_intervention
+    assert stored.status is TaskStatus.READY
+
+    runtime.raw_text = {}  # blocker resolved
+    report = await scheduler.run()
+    assert report.completed == [task.key]
+
+
+async def test_blocked_dependency_blocks_dependents(db, tmp_path) -> None:
+    config = make_config(max_task_retries=0)
+    runtime = RecordingRuntime(
+        raw_text={"T-1": response_block(status="blocked", blockers=["needs a key"])}
+    )
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    first = tasks.create_task("blocker", agent="backend")
+    second = tasks.create_task("dependent", agent="frontend", depends_on=[first.key])
+
+    report = await scheduler.run()
+    assert first.key in report.blocked
+    assert second.key in report.blocked
+    assert second.key not in runtime.order
+
+
+async def test_launch_failure_is_retried(db, tmp_path) -> None:
+    """An infrastructure failure should get another attempt."""
+    config = make_config(max_task_retries=1)
+
+    class Flaky(RecordingRuntime):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def run(self, request, on_event=None):
+            self.calls += 1
+            self.order.append(self._label(request.prompt))
+            self.requests.append(request)
+            if self.calls == 1:
+                raise OSError("failed to spawn claude.exe")
+            return RunResult(
+                status=RunStatus.SUCCEEDED,
+                session_id="s",
+                exit_code=0,
+                text=response_block(summary="worked on retry"),
+            )
+
+    runtime = Flaky()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+    report = await scheduler.run()
+
+    assert report.completed == [task.key]
+    assert runtime.calls == 2
+
+
+async def test_dry_run_task_failure_is_not_a_process_failure(db, tmp_path) -> None:
+    """A task failing must not look like infrastructure breaking.
+
+    Regression: the dry-run stub simulated a failed task by failing the process,
+    which classified as LAUNCH and burned retries on something that was really
+    the agent's own verdict.
+    """
+    config = make_config(max_task_retries=0)
+    runtime = DryRunRuntime(fail_keys={"T-1"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("doomed", agent="backend")
+
+    report = await scheduler.run()
+    assert report.failed == [task.key]
+    # The process succeeded; the agent reported failure.
+    from agentos.db.models import Run
+
+    with db.session() as session:
+        row = session.query(Run).order_by(Run.id.desc()).first()
+        assert row.exit_code == 0
+        assert row.status == "succeeded"
+
+
+async def test_dry_run_blocker_needs_intervention(db, tmp_path) -> None:
+    config = make_config(max_task_retries=3)
+    runtime = DryRunRuntime(block_keys={"T-1"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("blocked work", agent="backend")
+
+    report = await scheduler.run()
+    stored = tasks.get_task(task.key)
+    assert stored.status is TaskStatus.BLOCKED
+    assert stored.needs_intervention
+    assert stored.attempts == 0, "a blocker must not consume retries"
+    assert task.key in report.blocked
+
+
+async def test_dry_run_crash_is_infrastructure_and_retries(db, tmp_path) -> None:
+    config = make_config(max_task_retries=1)
+    runtime = DryRunRuntime(crash_keys={"T-1"})
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("crashes", agent="backend")
+
+    report = await scheduler.run()
+    assert report.failed == [task.key]
+    # Initial attempt plus one retry, because a crash is worth retrying.
+    assert len(runtime.requests) == 2
+    assert not tasks.get_task(task.key).needs_intervention

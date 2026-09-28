@@ -125,6 +125,8 @@ class Task(Base):
     result: Mapped[str | None] = mapped_column(Text, default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    needs_intervention: Mapped[bool] = mapped_column(default=False)
+    """Set when an agent reported a blocker, so readiness must not un-block it."""
 
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(default=None)

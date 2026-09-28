@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Engine, text
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,8 @@ ADDITIVE_COLUMNS: tuple[AddColumn, ...] = (
     AddColumn("messages", "read_at", "DATETIME"),
     # Phase 5: tasks belong to an objective.
     AddColumn("tasks", "objective_id", "INTEGER REFERENCES objectives(id)"),
+    # Phase 7: a task blocked by an agent must not be un-blocked by readiness.
+    AddColumn("tasks", "needs_intervention", "BOOLEAN DEFAULT 0"),
 )
 
 DROPPED_COLUMNS: tuple[DropColumn, ...] = (

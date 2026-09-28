@@ -86,6 +86,7 @@ class TaskRepository:
             result=row.result,
             error=row.error,
             attempts=row.attempts,
+            needs_intervention=row.needs_intervention,
             created_at=row.created_at,
             started_at=row.started_at,
             completed_at=row.completed_at,
@@ -136,6 +137,7 @@ class TaskRepository:
                     Task.status,
                     Task.priority,
                     Task.assigned_agent_id,
+                    Task.needs_intervention,
                 )
             ).all()
             edges = session.execute(
@@ -156,6 +158,7 @@ class TaskRepository:
                 priority=row.priority,
                 agent_name=agent_names.get(row.assigned_agent_id),
                 sequence=row.id,
+                needs_intervention=bool(row.needs_intervention),
             )
             for row in rows
         }
@@ -233,10 +236,13 @@ class TaskRepository:
         error: str | None = None,
         touch_started: bool = False,
         touch_completed: bool = False,
+        needs_intervention: bool | None = None,
     ) -> TaskView:
         with self.db.session() as session:
             row = self._require(session, key_or_id)
             row.status = status.value
+            if needs_intervention is not None:
+                row.needs_intervention = needs_intervention
             if result is not None:
                 row.result = result
             if error is not None:

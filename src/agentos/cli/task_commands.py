@@ -7,6 +7,7 @@ statuses or touch the database directly.
 from __future__ import annotations
 
 import asyncio
+import signal
 from typing import Annotated
 
 import typer
@@ -21,6 +22,7 @@ from agentos.runtime.dry_run import DryRunRuntime
 from agentos.schemas.dto import TaskView
 from agentos.schemas.enums import TaskStatus
 from agentos.services.dag import DependencyCycle
+from agentos.services.objectives import ObjectiveService
 from agentos.services.scheduler import Scheduler, SchedulerEvent
 from agentos.services.workspaces import WorkspaceService
 from agentos.services.tasks import (
@@ -271,6 +273,33 @@ def retry_task(key: Annotated[str, typer.Argument(help="Task key.")]) -> None:
     ctx.db.dispose()
 
 
+@task_app.command("unblock")
+def unblock_task(key: Annotated[str, typer.Argument(help="Task key.")]) -> None:
+    """Clear an agent-reported blocker so the task can run again."""
+    ctx = load_context()
+    service = _service(ctx)
+    try:
+        task = service.unblock(key)
+    except TaskNotFound:
+        console.print(f"[red]No task with key {key!r}.[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=1)
+    except InvalidTaskTransition as exc:
+        console.print(f"[yellow]{exc}[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=1) from exc
+    console.print(f"{task_glyph(task.status)} {task.key} -> {status_label(task.status)}")
+    ctx.db.dispose()
+
+
+def with_suppress(fn, *args) -> None:
+    """Call fn, ignoring failures. Used only on teardown paths."""
+    try:
+        fn(*args)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------- work
 
 
@@ -324,15 +353,61 @@ def work_command(
         f"retries: {ctx.config.orchestrator.max_task_retries}[/]"
     )
 
+    async def drive():
+        """Run the scheduler with a two-stage interrupt.
+
+        The first Ctrl+C stops launching new work and lets running agents
+        finish, so their results are recorded rather than thrown away. A second
+        Ctrl+C cancels them; the runtime kills the process tree and the database
+        keeps whatever was already committed.
+        """
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(scheduler.run(max_passes=max_passes))
+        interrupts = {"count": 0}
+
+        def on_interrupt() -> None:
+            interrupts["count"] += 1
+            if interrupts["count"] == 1:
+                scheduler.request_stop()
+                console.print(
+                    "\n[yellow]stopping: finishing running tasks. "
+                    "Ctrl+C again to cancel them.[/]"
+                )
+            else:
+                console.print("\n[red]cancelling running tasks...[/]")
+                task.cancel()
+
+        # add_signal_handler is POSIX-only; on Windows we fall back to the
+        # default KeyboardInterrupt, handled by the caller below.
+        installed = False
+        try:
+            loop.add_signal_handler(signal.SIGINT, on_interrupt)
+            installed = True
+        except (NotImplementedError, RuntimeError, AttributeError):
+            pass
+
+        try:
+            return await task
+        finally:
+            if installed:
+                with_suppress(loop.remove_signal_handler, signal.SIGINT)
+
     try:
-        report = asyncio.run(scheduler.run(max_passes=max_passes))
+        report = asyncio.run(drive())
     except DependencyCycle as exc:
         console.print(f"[red]{exc}[/]")
         console.print("[dim]Fix the graph before running the scheduler.[/]")
         ctx.db.dispose()
         raise typer.Exit(code=2) from exc
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Reached on Windows, where a signal handler cannot be installed, or on a
+        # second Ctrl+C. Task rows were updated as each task settled, so the
+        # database is consistent either way.
         console.print("\n[yellow]interrupted; database state preserved[/]")
+        console.print(
+            "[dim]Tasks left running were returned to the queue. "
+            "Run `agentctl work` again to continue.[/]"
+        )
         ctx.db.dispose()
         raise typer.Exit(code=130)
 
@@ -347,9 +422,39 @@ def work_command(
     if report.blocked:
         summary.add_row("blocked", f"[yellow]{', '.join(report.blocked)}[/]")
     summary.add_row("stopped", report.stop_reason)
+    if report.interrupted:
+        summary.add_row("interrupted", "yes")
     console.print(summary)
 
     console.print(tasks_table(task_service.list_tasks()))
+
+    # Objective status is derived from task state, so recompute it now that tasks
+    # have moved.
+    objective_service = ObjectiveService(
+        db=ctx.db,
+        config=ctx.config,
+        agent_service=agent_service,
+        task_service=task_service,
+    )
+    for objective in objective_service.refresh_all():
+        console.print(
+            f"[dim]objective {objective.id}: {objective.status.value}[/]"
+        )
+
+    blocked_needing_help = [
+        t for t in task_service.list_tasks() if t.needs_intervention
+    ]
+    if blocked_needing_help:
+        console.print(
+            "\n[yellow]These tasks reported blockers and will not be retried "
+            "automatically:[/]"
+        )
+        for task in blocked_needing_help:
+            console.print(f"  [yellow]{task.key}[/] {safe(task.error or '')}")
+        console.print(
+            "[dim]Resolve the blocker, then `agentctl task unblock <id>`.[/]"
+        )
+
     ctx.db.dispose()
     if report.failed:
         raise typer.Exit(code=1)

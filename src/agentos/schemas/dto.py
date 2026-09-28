@@ -91,6 +91,7 @@ class TaskView(BaseModel):
     result: str | None = None
     error: str | None = None
     attempts: int = 0
+    needs_intervention: bool = False
     created_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None

@@ -17,7 +17,7 @@ from agentos.config import Config
 from agentos.db.session import Database
 from agentos.prompts.task_prompt import build_task_prompt
 from agentos.schemas.dto import SchedulerReport, TaskView
-from agentos.schemas.enums import AgentStatus, TaskStatus
+from agentos.schemas.enums import AgentStatus, FailureKind, TaskStatus
 from agentos.services import dag
 from agentos.services.agents import AgentBusy, AgentPaused, AgentService
 from agentos.services.messages import MessageService
@@ -45,6 +45,35 @@ class SchedulerEvent:
     BLOCKED = "blocked"
     PASS = "pass"
     STOP = "stop"
+
+
+TIMEOUT_MARKERS = ("timeout", "timed out")
+LAUNCH_MARKERS = ("failed to spawn", "could not find", "no such file")
+
+
+def classify_run_failure(outcome) -> FailureKind:
+    """Classify a failure where the process itself did not succeed.
+
+    Pure and string-based because the CLI reports these as prose, not
+    structurally. Anything unrecognised is treated as a launch problem, which is
+    retryable -- the conservative choice, since the alternative would silently
+    give up on a transient error.
+    """
+    haystack = f"{outcome.error or ''} {outcome.text or ''}".lower()
+    if any(marker in haystack for marker in TIMEOUT_MARKERS):
+        return FailureKind.TIMEOUT
+    if any(marker in haystack for marker in LAUNCH_MARKERS):
+        return FailureKind.LAUNCH
+    return FailureKind.LAUNCH
+
+
+def classify_result(result) -> FailureKind:
+    """Classify a failure where the agent ran but the turn did not succeed."""
+    if not result.parsed:
+        return FailureKind.UNPARSEABLE
+    if result.status == "blocked" or result.blockers:
+        return FailureKind.BLOCKED
+    return FailureKind.AGENT_FAILED
 
 
 class Scheduler:
@@ -124,8 +153,13 @@ class Scheduler:
 
     async def _run_task(
         self, task: TaskView
-    ) -> tuple[TaskView, bool, str | None, str]:
-        """Execute one task. Returns (task, ok, error, agent output text)."""
+    ) -> tuple[TaskView, bool, str | None, str, FailureKind | None]:
+        """Execute one task.
+
+        Returns (task, ok, error, output, failure kind). The kind is what lets the
+        retry policy tell "the process would not start" apart from "the agent says
+        it is blocked".
+        """
         agent_name = task.assigned_agent
         assert agent_name is not None  # selection guarantees this
 
@@ -169,7 +203,13 @@ class Scheduler:
             await asyncio.to_thread(
                 self.tasks.tasks.set_status, task.id, TaskStatus.READY
             )
-            return task, False, f"agent unavailable: {exc}", ""
+            return (
+                task,
+                False,
+                f"agent unavailable: {exc}",
+                "",
+                FailureKind.UNAVAILABLE,
+            )
         except asyncio.CancelledError:
             await asyncio.to_thread(self.messages.release, inbox)
             await asyncio.to_thread(
@@ -177,14 +217,21 @@ class Scheduler:
             )
             raise
         except Exception as exc:
+            # The runtime raised rather than returning: the process never ran.
             await asyncio.to_thread(self.messages.release, inbox)
-            return task, False, f"{type(exc).__name__}: {exc}", ""
+            return (
+                task,
+                False,
+                f"{type(exc).__name__}: {exc}",
+                "",
+                FailureKind.LAUNCH,
+            )
 
         if not outcome.ok:
             # The process itself failed, so the agent never really read anything.
             await asyncio.to_thread(self.messages.release, inbox)
             error = outcome.error or "agent failed"
-            return task, False, error, outcome.text
+            return task, False, error, outcome.text, classify_run_failure(outcome)
 
         result = await self._apply_result(task, agent_name, outcome.text)
 
@@ -193,7 +240,7 @@ class Scheduler:
             reason = result.parse_error or (
                 "; ".join(result.blockers) or f"agent reported {result.status}"
             )
-            return task, False, reason, outcome.text
+            return task, False, reason, outcome.text, classify_result(result)
 
         # The run completed and its response was understood: the messages that
         # went into this prompt are genuinely consumed.
@@ -226,7 +273,7 @@ class Scheduler:
                 )
             summary = summary + "\n\n" + report.render()
 
-        return task, True, None, summary
+        return task, True, None, summary, None
 
     async def _apply_result(self, task: TaskView, agent_name: str, text: str):
         """Validate the agent response and apply what it legitimately asks for.
@@ -266,8 +313,23 @@ class Scheduler:
             self._notify(SchedulerEvent.REJECTED, f"{task.key}: {reason}")
         return result
 
-    async def _settle(self, task: TaskView, ok: bool, error: str | None, text: str = "") -> str:
-        """Record the outcome of a finished task and return the event name."""
+    async def _settle(
+        self,
+        task: TaskView,
+        ok: bool,
+        error: str | None,
+        text: str = "",
+        kind: FailureKind | None = None,
+    ) -> str:
+        """Record the outcome of a finished task and return the event name.
+
+        The retry policy depends on why the attempt failed:
+          * a reported blocker is never retried -- it needs intervention, and
+            another attempt would hit the same wall and spend more usage
+          * losing a race for a busy agent is not the task's fault, so it returns
+            to the queue without consuming an attempt
+          * everything else retries up to max_task_retries
+        """
         if ok:
             await asyncio.to_thread(
                 self.tasks.transition, task.id, TaskStatus.COMPLETED, text or "", None
@@ -275,11 +337,28 @@ class Scheduler:
             self._notify(SchedulerEvent.COMPLETED, task.key)
             return SchedulerEvent.COMPLETED
 
+        if kind is FailureKind.UNAVAILABLE:
+            # _run_task already returned it to READY; do not penalise the task.
+            self._notify(SchedulerEvent.RETRY, f"{task.key}: {error}")
+            return SchedulerEvent.RETRY
+
+        if kind is FailureKind.BLOCKED:
+            await asyncio.to_thread(
+                self.tasks.transition,
+                task.id,
+                TaskStatus.BLOCKED,
+                None,
+                error or "blocked",
+                True,
+            )
+            self._notify(SchedulerEvent.BLOCKED, f"{task.key}: {error}")
+            return SchedulerEvent.BLOCKED
+
         attempts = await asyncio.to_thread(self.tasks.tasks.increment_attempts, task.id)
         max_retries = self.config.orchestrator.max_task_retries
         if attempts <= max_retries:
-            # Return to the queue for another attempt; the retry prompt will
-            # include the previous error.
+            # Return to the queue for another attempt; the retry prompt includes
+            # the previous error.
             await asyncio.to_thread(
                 self.tasks.tasks.set_status,
                 task.id,
@@ -287,15 +366,18 @@ class Scheduler:
                 None,
                 error or "unknown failure",
             )
+            label = kind.value if kind else "failure"
             self._notify(
-                SchedulerEvent.RETRY, f"{task.key} (attempt {attempts}/{max_retries})"
+                SchedulerEvent.RETRY,
+                f"{task.key} ({label}, attempt {attempts}/{max_retries})",
             )
             return SchedulerEvent.RETRY
 
         await asyncio.to_thread(
             self.tasks.transition, task.id, TaskStatus.FAILED, None, error or "failed"
         )
-        self._notify(SchedulerEvent.FAILED, f"{task.key}: {error}")
+        suffix = f" [{kind.value}]" if kind else ""
+        self._notify(SchedulerEvent.FAILED, f"{task.key}: {error}{suffix}")
         return SchedulerEvent.FAILED
 
     async def run(self, max_passes: int = 1000) -> SchedulerReport:
@@ -386,8 +468,8 @@ class Scheduler:
                         tid for tid, handle in running.items() if handle is finished
                     )
                     del running[task_id]
-                    task, ok, error, text = await finished
-                    event = await self._settle(task, ok, error, text)
+                    task, ok, error, text, kind = await finished
+                    event = await self._settle(task, ok, error, text, kind)
                     if event == SchedulerEvent.COMPLETED:
                         completed.append(task.key)
                     elif event == SchedulerEvent.FAILED:
