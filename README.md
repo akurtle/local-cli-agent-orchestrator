@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: phase 15 complete (of an ongoing production-hardening series)
+## Status: phase 16 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -39,6 +39,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 13 | Context and memory management | **done** |
 | 14 | Capabilities and permissions | **done** |
 | 15 | Safe command execution | **done** |
+| 16 | Event bus and observability | **done** |
 
 ## Install
 
@@ -68,13 +69,16 @@ agentctl permission grant|revoke|denials    adjust and audit permissions
 agentctl commands [agent] [--verdict]       what agents ran, including refusals
 agentctl command-check <cmd...>             what the policy would do
 agentctl approvals                          commands waiting for a human
+agentctl timeline [--task|--agent|--category]  execution history
+agentctl watch                              new events as they occur
+agentctl stats                               run metrics
 agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 695 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 727 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -186,6 +190,28 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Events explain, they do not decide
+Everything important emits an event, persisted to SQLite and fanned out in-process.
+Events exist for debugging and observability and are explicitly **not** the system
+of record: an event says a transition happened, while the tasks table says what is
+true now.
+
+Emitting can never break orchestration. A failing subscriber is isolated, and a
+failing write is swallowed with the event still delivered in memory -- losing a log
+line is always better than losing the work it describes.
+
+`agentctl timeline --task AUTH-3` answers "why did this run?" by showing
+`task.created` -> `task.ready  all dependencies complete` -> `task.started` ->
+`task.completed`. Readiness events carry the reason string from the scheduling
+core, so a blocked task names the dependency that blocked it.
+
+`agentctl watch` polls rather than subscribing, because the scheduler usually runs
+in another terminal. The limitation is honest: an event appears within one poll
+interval, and there is no daemon to attach to.
+
+`agentctl stats` derives every figure from stored rows on each call, so a counter
+cannot drift from the rows it claims to count.
 
 ### Command execution is restricted, not sandboxed
 Agents can run development commands through one service, which refuses anything
@@ -452,6 +478,8 @@ src/agentos/
   services/permissions.py grants, enforcement and the denial trail
   services/commands.py    PURE command policy + the only agent-facing spawner
   services/command_service.py  capability check, run, record
+  services/events.py      the in-process event bus plus persistence
+  services/metrics.py     figures derived from stored rows, never accumulated
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

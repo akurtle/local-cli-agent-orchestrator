@@ -14,6 +14,7 @@ from agentos.repositories.tasks import TaskNotFound, TaskRepository
 from agentos.schemas.dto import TaskView
 from agentos.schemas.enums import TaskStatus
 from agentos.services import dag
+from agentos.services.events import EventBus, EventType
 
 # Legal task status moves, as data.
 TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
@@ -61,11 +62,14 @@ class TaskValidationError(ValueError):
 
 
 class TaskService:
-    def __init__(self, db: Database, config: Config) -> None:
+    def __init__(
+        self, db: Database, config: Config, event_bus: EventBus | None = None
+    ) -> None:
         self.db = db
         self.config = config
         self.tasks = TaskRepository(db)
         self.agents = AgentRepository(db)
+        self.events = event_bus or EventBus(db)
 
     # ----------------------------------------------------------------- creation
 
@@ -135,6 +139,18 @@ class TaskService:
         for dep_id in dep_ids:
             self._add_dependency_checked(created.id, dep_id)
 
+        # Announce creation before recomputing readiness, or the timeline shows a
+        # task becoming ready before it was created.
+        created_view = self.tasks.get(created.id)
+        self.events.emit(
+            EventType.TASK_CREATED,
+            summary=created_view.title[:200],
+            task_key=created_view.key,
+            agent=created_view.assigned_agent,
+            objective_id=created_view.objective_id,
+            created_by=created_by or "human",
+            depends_on=created_view.depends_on,
+        )
         self.refresh_readiness()
         return self.tasks.get(created.id)
 
@@ -193,6 +209,12 @@ class TaskService:
                 f"{task.key} is already {task.status.value}"
             )
         cancelled = self.transition(key_or_id, TaskStatus.CANCELLED)
+        self.events.emit(
+            EventType.TASK_CANCELLED,
+            task_key=cancelled.key,
+            agent=cancelled.assigned_agent,
+            objective_id=cancelled.objective_id,
+        )
         self.refresh_readiness()
         return cancelled
 
@@ -209,7 +231,15 @@ class TaskService:
             key_or_id, TaskStatus.PENDING, error="", needs_intervention=False
         )
         self.refresh_readiness()
-        return self.tasks.get(key_or_id)
+        result = self.tasks.get(key_or_id)
+        self.events.emit(
+            EventType.TASK_RETRIED,
+            summary="requeued by operator",
+            task_key=result.key,
+            agent=result.assigned_agent,
+            objective_id=result.objective_id,
+        )
+        return result
 
     def unblock(self, key_or_id: str | int) -> TaskView:
         """Clear an agent-reported blocker so the task can be scheduled again."""
@@ -220,7 +250,15 @@ class TaskService:
             key_or_id, TaskStatus.PENDING, error="", needs_intervention=False
         )
         self.refresh_readiness()
-        return self.tasks.get(key_or_id)
+        result = self.tasks.get(key_or_id)
+        self.events.emit(
+            EventType.TASK_UNBLOCKED,
+            summary="blocker cleared by operator",
+            task_key=result.key,
+            agent=result.assigned_agent,
+            objective_id=result.objective_id,
+        )
+        return result
 
     # ---------------------------------------------------------------- readiness
 
@@ -241,9 +279,24 @@ class TaskService:
             if not decisions:
                 break
             for decision in decisions:
-                changed.append(
-                    self.tasks.set_status(decision.task_id, decision.status)
-                )
+                updated = self.tasks.set_status(decision.task_id, decision.status)
+                changed.append(updated)
+                if decision.status is TaskStatus.READY:
+                    self.events.emit(
+                        EventType.TASK_READY,
+                        summary=decision.reason,
+                        task_key=updated.key,
+                        agent=updated.assigned_agent,
+                        objective_id=updated.objective_id,
+                    )
+                elif decision.status is TaskStatus.BLOCKED:
+                    self.events.emit(
+                        EventType.TASK_BLOCKED,
+                        summary=decision.reason,
+                        task_key=updated.key,
+                        agent=updated.assigned_agent,
+                        objective_id=updated.objective_id,
+                    )
         return changed
 
     def validate_graph(self) -> None:

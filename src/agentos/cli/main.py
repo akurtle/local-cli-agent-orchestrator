@@ -35,6 +35,11 @@ from agentos.cli.command_commands import (
     list_approvals_command,
     list_commands_command,
 )
+from agentos.cli.event_commands import (
+    stats_command,
+    timeline_command,
+    watch_command,
+)
 from agentos.cli.git_commands import diff_command, git_app
 from agentos.cli.permission_commands import (
     list_permissions_command,
@@ -191,6 +196,45 @@ def command_check(
 def approvals() -> None:
     """Show commands waiting for human approval."""
     list_approvals_command()
+
+
+@app.command("timeline")
+def timeline(
+    agent: Annotated[
+        str | None, typer.Option("--agent", help="Only this agent's events.")
+    ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Only this task's events.")
+    ] = None,
+    objective: Annotated[
+        int | None, typer.Option("--objective", help="Only this objective.")
+    ] = None,
+    category: Annotated[
+        str | None,
+        typer.Option("--category", help="task, agent, command, git, ..."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 100,
+) -> None:
+    """Show the execution history: what happened, and why."""
+    timeline_command(
+        agent=agent, task=task, objective=objective, category=category, limit=limit
+    )
+
+
+@app.command("watch")
+def watch(
+    interval: Annotated[
+        float, typer.Option("--interval", help="Seconds between polls.")
+    ] = 1.0,
+) -> None:
+    """Print new events as they occur."""
+    watch_command(interval=interval)
+
+
+@app.command("stats")
+def stats() -> None:
+    """Show run metrics derived from stored rows."""
+    stats_command()
 
 
 @app.command("logs")

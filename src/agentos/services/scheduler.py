@@ -21,6 +21,7 @@ from agentos.schemas.enums import AgentStatus, FailureKind, TaskStatus
 from agentos.services import dag
 from agentos.services.agents import AgentBusy, AgentPaused, AgentService
 from agentos.services.context_service import ContextService
+from agentos.services.events import EventBus, EventType
 from agentos.services.memory import MemoryService
 from agentos.schemas.capabilities import Capability
 from agentos.services.messages import MessageService
@@ -96,6 +97,7 @@ class Scheduler:
         workspace_service: WorkspaceService | None = None,
         context_service: ContextService | None = None,
         memory_service: MemoryService | None = None,
+        event_bus: EventBus | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self.db = db
@@ -109,6 +111,7 @@ class Scheduler:
         self.workspaces = workspace_service
         self.memory = memory_service or MemoryService(db, config)
         self.permissions = PermissionService(db, config)
+        self.events = event_bus or EventBus(db)
         self.context = context_service or ContextService(
             db, config, task_service, self.memory
         )
@@ -204,6 +207,13 @@ class Scheduler:
                     SchedulerEvent.WORKSPACE,
                     f"{agent_name} -> {workspace.branch}",
                 )
+                await self.events.emit_async(
+                    EventType.GIT_WORKTREE_CREATED,
+                    summary=str(workspace.branch),
+                    agent=agent_name,
+                    task_key=task.key,
+                    path=str(workspace.path),
+                )
                 agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
 
         # Rotate first: rotation writes what the old session knew into memory,
@@ -211,6 +221,12 @@ class Scheduler:
         rotated = await self.agents.maybe_rotate(agent_name, task.objective_id)
         if rotated:
             self._notify(SchedulerEvent.ROTATED, f"{agent_name}: {rotated}")
+            await self.events.emit_async(
+                EventType.AGENT_ROTATED,
+                summary=rotated,
+                agent=agent_name,
+                task_key=task.key,
+            )
             agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
 
         assembled = await asyncio.to_thread(
@@ -318,6 +334,14 @@ class Scheduler:
                     f"{agent_name} changed {len(report.files_changed)} file(s) "
                     f"without edit_files ({task.key})",
                 )
+                await self.events.emit_async(
+                    EventType.CAPABILITY_DENIED,
+                    summary=f"edit_files: {len(report.files_changed)} file(s)",
+                    agent=agent_name,
+                    task_key=task.key,
+                    capability="edit_files",
+                    files=report.files_changed[:20],
+                )
             summary = summary + "\n\n" + report.render()
 
         await self._record_knowledge(task, agent_name, result)
@@ -343,6 +367,14 @@ class Scheduler:
                 SchedulerEvent.REMEMBERED,
                 f"{agent_name}: {len(stored)} fact(s) from {task.key}",
             )
+            await self.events.emit_async(
+                EventType.MEMORY_RECORDED,
+                summary=f"{len(stored)} fact(s)",
+                agent=agent_name,
+                task_key=task.key,
+                objective_id=task.objective_id,
+                count=len(stored),
+            )
 
         # A handoff is only useful if somebody is waiting on this work.
         recipients = await asyncio.to_thread(self._dependent_agents, task)
@@ -360,6 +392,14 @@ class Scheduler:
             )
             self._notify(
                 SchedulerEvent.HANDOFF, f"{agent_name} -> {recipient} ({task.key})"
+            )
+            await self.events.emit_async(
+                EventType.HANDOFF_CREATED,
+                summary=f"{agent_name} -> {recipient}",
+                agent=agent_name,
+                task_key=task.key,
+                objective_id=task.objective_id,
+                recipient=recipient,
             )
 
     def _dependent_agents(self, task: TaskView) -> list[str]:
@@ -439,6 +479,13 @@ class Scheduler:
                 self.tasks.transition, task.id, TaskStatus.COMPLETED, text or "", None
             )
             self._notify(SchedulerEvent.COMPLETED, task.key)
+            await self.events.emit_async(
+                EventType.TASK_COMPLETED,
+                summary=(text or "")[:200],
+                task_key=task.key,
+                agent=task.assigned_agent,
+                objective_id=task.objective_id,
+            )
             return SchedulerEvent.COMPLETED
 
         if kind is FailureKind.UNAVAILABLE:
@@ -456,6 +503,14 @@ class Scheduler:
                 True,
             )
             self._notify(SchedulerEvent.BLOCKED, f"{task.key}: {error}")
+            await self.events.emit_async(
+                EventType.TASK_BLOCKED,
+                summary=error or "blocked",
+                task_key=task.key,
+                agent=task.assigned_agent,
+                objective_id=task.objective_id,
+                needs_intervention=True,
+            )
             return SchedulerEvent.BLOCKED
 
         attempts = await asyncio.to_thread(self.tasks.tasks.increment_attempts, task.id)
@@ -475,6 +530,15 @@ class Scheduler:
                 SchedulerEvent.RETRY,
                 f"{task.key} ({label}, attempt {attempts}/{max_retries})",
             )
+            await self.events.emit_async(
+                EventType.TASK_RETRIED,
+                summary=f"{label}, attempt {attempts}/{max_retries}",
+                task_key=task.key,
+                agent=task.assigned_agent,
+                objective_id=task.objective_id,
+                failure_kind=label,
+                attempt=attempts,
+            )
             return SchedulerEvent.RETRY
 
         await asyncio.to_thread(
@@ -482,6 +546,15 @@ class Scheduler:
         )
         suffix = f" [{kind.value}]" if kind else ""
         self._notify(SchedulerEvent.FAILED, f"{task.key}: {error}{suffix}")
+        await self.events.emit_async(
+            EventType.TASK_FAILED,
+            summary=(error or "failed")[:200],
+            task_key=task.key,
+            agent=task.assigned_agent,
+            objective_id=task.objective_id,
+            failure_kind=kind.value if kind else None,
+            attempts=attempts,
+        )
         return SchedulerEvent.FAILED
 
     async def run(self, max_passes: int = 1000) -> SchedulerReport:
@@ -490,6 +563,10 @@ class Scheduler:
         Stops when nothing can progress, when interrupted, or when the pass
         ceiling is hit (a safety valve, not an expected exit).
         """
+        await self.events.emit_async(
+            EventType.SCHEDULER_STARTED,
+            summary=f"concurrency {self.config.orchestrator.max_concurrent_agents}",
+        )
         await asyncio.to_thread(self.tasks.validate_graph)
 
         recovered = await asyncio.to_thread(self.recover_stale_running)
@@ -540,6 +617,13 @@ class Scheduler:
                         self._notify(
                             SchedulerEvent.DISPATCH,
                             f"{task.key} -> {task.assigned_agent}",
+                        )
+                        await self.events.emit_async(
+                            EventType.TASK_STARTED,
+                            summary=f"dispatched to {task.assigned_agent}",
+                            task_key=task.key,
+                            agent=task.assigned_agent,
+                            objective_id=task.objective_id,
                         )
 
                 if not running:
@@ -598,6 +682,13 @@ class Scheduler:
         )
 
         self._notify(SchedulerEvent.STOP, stop_reason)
+        await self.events.emit_async(
+            EventType.SCHEDULER_STOPPED,
+            summary=stop_reason,
+            completed=len(completed),
+            failed=len(failed),
+            dispatched=dispatched,
+        )
         return SchedulerReport(
             passes=passes,
             dispatched=dispatched,

@@ -358,3 +358,32 @@ class CommandRun(Base):
 
     def __repr__(self) -> str:
         return f"<CommandRun {self.executable} {self.verdict}>"
+
+
+class Event(Base):
+    """Something that happened.
+
+    Events are for debugging and observability, never the system of record: an
+    event says a transition occurred, while the tasks table says what is true
+    now. Most columns are optional by design -- an agent event has no task, a
+    scheduler event has neither.
+    """
+
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    type: Mapped[str] = mapped_column(String(48), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+
+    objective_id: Mapped[int | None] = mapped_column(
+        Integer, default=None, index=True
+    )
+    task_key: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    agent: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+    run_id: Mapped[int | None] = mapped_column(Integer, default=None)
+
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+
+    def __repr__(self) -> str:
+        return f"<Event {self.type}>"
