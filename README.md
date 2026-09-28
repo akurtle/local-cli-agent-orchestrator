@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: phase 16 complete (of an ongoing production-hardening series)
+## Status: phase 17 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -40,6 +40,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 14 | Capabilities and permissions | **done** |
 | 15 | Safe command execution | **done** |
 | 16 | Event bus and observability | **done** |
+| 17 | Replanning and failure recovery | **done** |
 
 ## Install
 
@@ -72,13 +73,14 @@ agentctl approvals                          commands waiting for a human
 agentctl timeline [--task|--agent|--category]  execution history
 agentctl watch                              new events as they occur
 agentctl stats                               run metrics
+agentctl replan [--reason|--task]            have the manager repair the graph
 agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 727 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 777 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -190,6 +192,25 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Replanning mutates the graph, under supervision
+After a failure the manager can be asked to repair the plan. It returns
+**operations** rather than a new plan, because the graph already has history:
+create_task, add_dependency, remove_dependency, cancel_task, retry_task,
+reassign_task. `validate_operations` is pure, so every refusal rule is tested
+without a database.
+
+The invariant it defends is that **completed history is immutable**. Python refuses
+to touch a completed or cancelled task, to cancel a running one, to retry anything
+that is not failed or blocked, to reference a task or agent that does not exist, or
+to create a cycle -- checked across the live graph *plus* every edge the replan
+adds, so two individually-safe edges that close a loop together are caught.
+
+A rejected operation does not stop the rest, but it is reported: silently dropping
+one would make a partial application look like a full one.
+
+Automatic replanning is off by default. An unattended replan spends usage on every
+failure, and a wrong corrective plan is harder to unpick than a stalled one.
 
 ### Events explain, they do not decide
 Everything important emits an event, persisted to SQLite and fanned out in-process.
@@ -480,6 +501,8 @@ src/agentos/
   services/command_service.py  capability check, run, record
   services/events.py      the in-process event bus plus persistence
   services/metrics.py     figures derived from stored rows, never accumulated
+  services/replanner.py   PURE graph-mutation validation + application
+  services/replan_service.py  ask the manager, validate, apply
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

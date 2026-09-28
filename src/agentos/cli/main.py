@@ -41,6 +41,7 @@ from agentos.cli.event_commands import (
     watch_command,
 )
 from agentos.cli.git_commands import diff_command, git_app
+from agentos.cli.replan_commands import replan_command
 from agentos.cli.permission_commands import (
     list_permissions_command,
     permission_app,
@@ -311,6 +312,35 @@ def run_objective(
         auto_approve=auto_approve,
         manager=manager,
         then_work=work,
+        timeout=timeout,
+    )
+
+
+@app.command("replan")
+def replan(
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Why the plan needs changing.")
+    ] = None,
+    task: Annotated[
+        str | None,
+        typer.Option("--task", help="Replan around this task (default: the stuck one)."),
+    ] = None,
+    objective: Annotated[
+        int | None, typer.Option("--objective", help="Scope to this objective.")
+    ] = None,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", "-y", help="Skip the approval prompt.")
+    ] = False,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", help="Seconds allowed for replanning.")
+    ] = None,
+) -> None:
+    """Ask the manager to repair the task graph after a failure."""
+    replan_command(
+        reason=reason,
+        task=task,
+        objective=objective,
+        auto_approve=auto_approve,
         timeout=timeout,
     )
 

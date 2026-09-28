@@ -172,6 +172,21 @@ class TaskService:
         self.refresh_readiness()
         return self.tasks.get(task.id)
 
+    def remove_dependency(self, task_key: str, depends_on_key: str) -> TaskView:
+        """Drop a prerequisite.
+
+        Needed when corrective replanning supersedes work: a task left depending
+        on something cancelled would stay blocked forever.
+        """
+        task = self.tasks.get(task_key)
+        dep = self.tasks.get(depends_on_key)
+        if not self.tasks.remove_dependency(task.id, dep.id):
+            raise TaskValidationError(
+                f"{task.key} does not depend on {dep.key}"
+            )
+        self.refresh_readiness()
+        return self.tasks.get(task.id)
+
     # -------------------------------------------------------------- transitions
 
     def transition(

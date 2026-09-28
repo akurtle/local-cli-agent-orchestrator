@@ -22,6 +22,25 @@ class ProjectSection(BaseModel):
     description: str = ""
 
 
+class AutoReplanSection(BaseModel):
+    """When the manager is asked to repair the plan without being told to.
+
+    All off by default. An unattended replan loop spends usage on every failure,
+    and a wrong corrective plan is harder to unpick than a stalled one, so this
+    is opt-in.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_failed: bool = False
+    blocker: bool = False
+    review_rejection: bool = False
+    verification_failed: bool = False
+    conflict: bool = False
+    manual: bool = True
+    """A replan asked for explicitly always proceeds."""
+
+
 class OrchestratorSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -29,6 +48,7 @@ class OrchestratorSection(BaseModel):
     default_timeout_seconds: float = Field(default=900.0, gt=0)
     max_task_retries: int = Field(default=1, ge=0, le=10)
     manager_role: str = Field(default="manager", min_length=1)
+    auto_replan: AutoReplanSection = Field(default_factory=AutoReplanSection)
     """Which role plans objectives. Rename it if your roster uses another word."""
 
 
@@ -215,6 +235,14 @@ orchestrator:
 # agents:
 #   reviewer:
 #     capabilities: [read_files, run_tests, git_diff, message_agent]
+
+# When the manager should repair the plan on its own. Off by default: an
+# unattended replan spends usage on every failure.
+#
+# orchestrator:
+#   auto_replan:
+#     task_failure: false
+#     blocker: false
 
 # Which development commands agents may run. Defaults cover the usual test and
 # lint tooling; shells and network tools are denied, and history-rewriting git

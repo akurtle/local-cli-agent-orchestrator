@@ -228,6 +228,20 @@ class TaskRepository:
                     )
                 )
 
+    def remove_dependency(self, task_id: int, depends_on_task_id: int) -> bool:
+        """Drop an edge. Returns False if it was not there."""
+        with self.db.session() as session:
+            row = session.scalar(
+                select(TaskDependency).where(
+                    TaskDependency.task_id == task_id,
+                    TaskDependency.depends_on_task_id == depends_on_task_id,
+                )
+            )
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
     def set_status(
         self,
         key_or_id: str | int,
