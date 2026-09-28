@@ -299,3 +299,27 @@ class Handoff(Base):
 
     def __repr__(self) -> str:
         return f"<Handoff {self.from_agent}->{self.to_agent} {self.task_key}>"
+
+
+class Denial(Base):
+    """An action the orchestrator refused because the agent lacked a capability.
+
+    Recorded rather than merely logged: a pattern of denials is how you discover
+    that a role's permissions are wrong, or that an agent is trying to work
+    outside its remit.
+    """
+
+    __tablename__ = "denials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent: Mapped[str] = mapped_column(String(64), index=True)
+    capability: Mapped[str] = mapped_column(String(32), index=True)
+    action: Mapped[str] = mapped_column(String(64))
+    """What was attempted, e.g. "edit_files" or "request_task"."""
+    detail: Mapped[str] = mapped_column(Text, default="")
+    task_key: Mapped[str | None] = mapped_column(String(64), default=None)
+    run_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    def __repr__(self) -> str:
+        return f"<Denial {self.agent} {self.capability}>"

@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: phase 13 complete (of an ongoing production-hardening series)
+## Status: phase 14 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -37,6 +37,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 11 | Approval gates | **done** |
 | 12 | Textual TUI | **done** |
 | 13 | Context and memory management | **done** |
+| 14 | Capabilities and permissions | **done** |
 
 ## Install
 
@@ -61,13 +62,15 @@ agentctl logs <agent> | runs | run-show     invocation history
 agentctl context <agent> [--full|--layer]   what the next prompt will contain
 agentctl memories | memory add|forget       what the orchestrator remembers
 agentctl memory handoffs                    packets passed between agents
+agentctl permissions [agent]                what each agent may do
+agentctl permission grant|revoke|denials    adjust and audit permissions
 agentctl pause|resume <agent>               take an agent out of rotation
 ```
 
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 607 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 647 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -179,6 +182,27 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### Capabilities are enforced in code, in three layers
+A prompt saying "do not edit files" is guidance. A reviewer without `edit_files`
+is stopped by three independent mechanisms:
+
+1. **Preventive** -- the tools for a missing capability go to the CLI as
+   `--disallowedTools`, so `Edit`, `Write` and `NotebookEdit` are unavailable.
+2. **Validating** -- messages and requested tasks in the response block are
+   refused if the agent lacks `message_agent` / `request_task`.
+3. **Detective** -- git is compared against what the agent was permitted to do,
+   so an edit that somehow got through is still caught and recorded.
+
+A denylist rather than an allowlist for layer 1: enumerating every tool an agent
+may use risks omitting something benign and breaking it, whereas denying the
+specific write and execute tools is precise, and layer 3 catches any gap.
+
+Every refusal is persisted to `denials`, because a refusal that leaves no trace
+cannot be told apart from the action never having been attempted. Defaults are
+per role, so existing projects keep working -- but no role gets `git_merge`, and an
+unrecognised role gets read-only, since guessing that an unknown role may write is
+the wrong way to be wrong.
 
 ### Context is layered, not concatenated
 The orchestrator decides what an agent sees, layer by layer:
@@ -403,6 +427,8 @@ src/agentos/
   services/context_service.py  gathers the layers from the database
   services/memory.py      scoped memory and handoff packets
   services/rotation.py    PURE session rotation policy
+  schemas/capabilities.py PURE capability model and tool denylist
+  services/permissions.py grants, enforcement and the denial trail
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

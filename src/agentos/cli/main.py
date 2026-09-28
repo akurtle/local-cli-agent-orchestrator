@@ -31,6 +31,10 @@ from agentos.cli.context_commands import (
     memory_app,
 )
 from agentos.cli.git_commands import diff_command, git_app
+from agentos.cli.permission_commands import (
+    list_permissions_command,
+    permission_app,
+)
 from agentos.cli.integrate_commands import integrate_command
 from agentos.cli.run_commands import (
     list_objectives_command,
@@ -68,6 +72,7 @@ app.add_typer(agent_app)
 app.add_typer(task_app)
 app.add_typer(git_app)
 app.add_typer(memory_app)
+app.add_typer(permission_app)
 
 
 @app.command("status")
@@ -135,6 +140,16 @@ def memories(
 ) -> None:
     """Show what the orchestrator remembers."""
     list_memory_command(agent=agent, limit=limit)
+
+
+@app.command("permissions")
+def permissions(
+    agent: Annotated[
+        str | None, typer.Argument(help="Show only this agent.")
+    ] = None,
+) -> None:
+    """Show what each agent is allowed to do."""
+    list_permissions_command(agent=agent)
 
 
 @app.command("logs")

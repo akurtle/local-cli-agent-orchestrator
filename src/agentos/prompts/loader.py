@@ -127,6 +127,7 @@ def build_system_prompt(
     roster: dict[str, str] | None = None,
     project_root: Path | None = None,
     explicit_path: str | None = None,
+    capabilities: str = "",
 ) -> str:
     """Assemble the full system prompt for one agent.
 
@@ -151,6 +152,9 @@ def build_system_prompt(
                 "## Other agents you may address\n"
                 "These are the only valid recipients. Do not invent others.\n" + lines
             )
+
+    if capabilities:
+        parts.append("## CAPABILITIES\n" + capabilities)
 
     parts.append(response_contract())
     return "\n\n".join(parts)

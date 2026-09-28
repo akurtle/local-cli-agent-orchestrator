@@ -32,6 +32,8 @@ class RunRequest(BaseModel):
     model: str | None = None
     timeout_seconds: float | None = None
     allowed_tools: list[str] = Field(default_factory=list)
+    disallowed_tools: list[str] = Field(default_factory=list)
+    """Tools the agent must not be able to use, from its capabilities."""
     stream: bool = True
 
 

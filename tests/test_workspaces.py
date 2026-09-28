@@ -288,3 +288,168 @@ def test_init_leaves_non_git_directories_alone(tmp_path: Path) -> None:
     root.mkdir()
     assert _ignore_our_artifacts(root) is False
     assert not (root / ".gitignore").exists()
+
+
+# ------------------------------- phase 14: detective capability enforcement
+
+
+async def test_unauthorised_edit_is_detected_and_recorded(tmp_path) -> None:
+    """Layer 3: git is the ground truth.
+
+    Even if a reviewer somehow edits files, the orchestrator compares what git
+    reports against what the agent was permitted to do, and records the breach.
+    """
+    import json
+
+    from agentos.config import Config
+    from agentos.db.session import Database
+    from agentos.schemas.enums import RunStatus
+    from agentos.schemas.responses import RESPONSE_BEGIN, RESPONSE_END
+    from agentos.schemas.runtime import RunResult
+    from agentos.services.agents import AgentService
+    from agentos.services.scheduler import Scheduler
+    from agentos.services.tasks import TaskService
+    from tests.test_agents import StubRuntime
+    from tests.test_vcs import init_repo
+
+    root = tmp_path / "project"
+    git = await init_repo(root)
+    paths = ProjectPaths(root=root)
+    paths.ensure()
+
+    config = Config.model_validate(
+        {
+            "orchestrator": {"max_task_retries": 0},
+            "agents": {"reviewer": {"role": "reviewer", "worktree": True}},
+        }
+    )
+    db = Database(paths.db_file)
+    db.create_all()
+
+    block = "\n".join(
+        [
+            RESPONSE_BEGIN,
+            json.dumps(
+                {
+                    "status": "completed",
+                    "summary": "reviewed, and edited a file",
+                    "files_changed": ["sneaky.py"],
+                    "messages": [],
+                    "requested_tasks": [],
+                    "blockers": [],
+                }
+            ),
+            RESPONSE_END,
+        ]
+    )
+
+    class EditingReviewer(StubRuntime):
+        """Simulates the tool denial being bypassed."""
+
+        async def run(self, request, on_event=None):
+            self.requests.append(request)
+            if request.cwd:
+                (Path(request.cwd) / "sneaky.py").write_text("x = 1\n", encoding="utf-8")
+            return RunResult(
+                status=RunStatus.SUCCEEDED,
+                session_id="s",
+                exit_code=0,
+                text=block,
+            )
+
+    runtime = EditingReviewer()
+    agents = AgentService(db, config, runtime, root)
+    agents.sync_from_config()
+    tasks = TaskService(db, config)
+    events: list[tuple[str, str]] = []
+    scheduler = Scheduler(
+        db=db,
+        config=config,
+        agent_service=agents,
+        task_service=tasks,
+        workspace_service=WorkspaceService(config, paths, git),
+        on_progress=lambda e, d: events.append((e, d)),
+    )
+
+    task = tasks.create_task("review it", agent="reviewer", prefix="REV")
+    await scheduler.run()
+
+    # The edit happened, and was caught.
+    denials = scheduler.permissions.denials()
+    assert [d.capability for d in denials] == ["edit_files"]
+    assert "sneaky.py" in denials[0].detail
+    assert denials[0].task_key == task.key
+    assert any(e == "denied" for e, _ in events)
+
+    # The preventive layer was also in force on the invocation itself.
+    assert "Edit" in runtime.requests[0].disallowed_tools
+    db.dispose()
+
+
+async def test_permitted_edit_records_no_denial(tmp_path) -> None:
+    """A backend changing files is normal and must not be flagged."""
+    import json
+
+    from agentos.config import Config
+    from agentos.db.session import Database
+    from agentos.schemas.enums import RunStatus
+    from agentos.schemas.responses import RESPONSE_BEGIN, RESPONSE_END
+    from agentos.schemas.runtime import RunResult
+    from agentos.services.agents import AgentService
+    from agentos.services.scheduler import Scheduler
+    from agentos.services.tasks import TaskService
+    from tests.test_agents import StubRuntime
+    from tests.test_vcs import init_repo
+
+    root = tmp_path / "project"
+    git = await init_repo(root)
+    paths = ProjectPaths(root=root)
+    paths.ensure()
+
+    config = Config.model_validate(
+        {"agents": {"backend": {"role": "backend", "worktree": True}}}
+    )
+    db = Database(paths.db_file)
+    db.create_all()
+
+    block = "\n".join(
+        [
+            RESPONSE_BEGIN,
+            json.dumps(
+                {
+                    "status": "completed",
+                    "summary": "built it",
+                    "files_changed": ["feature.py"],
+                    "messages": [],
+                    "requested_tasks": [],
+                    "blockers": [],
+                }
+            ),
+            RESPONSE_END,
+        ]
+    )
+
+    class Builder(StubRuntime):
+        async def run(self, request, on_event=None):
+            self.requests.append(request)
+            if request.cwd:
+                (Path(request.cwd) / "feature.py").write_text("y = 2\n", encoding="utf-8")
+            return RunResult(
+                status=RunStatus.SUCCEEDED, session_id="s", exit_code=0, text=block
+            )
+
+    agents = AgentService(db, config, Builder(), root)
+    agents.sync_from_config()
+    tasks = TaskService(db, config)
+    scheduler = Scheduler(
+        db=db,
+        config=config,
+        agent_service=agents,
+        task_service=tasks,
+        workspace_service=WorkspaceService(config, paths, git),
+    )
+    tasks.create_task("build it", agent="backend")
+    await scheduler.run()
+
+    assert scheduler.permissions.denials() == []
+    db.dispose()

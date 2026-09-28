@@ -91,6 +91,8 @@ class AgentSection(BaseModel):
     model: str | None = None
     prompt: str | None = None
     """Path to a custom role brief, relative to the project root."""
+    capabilities: list[str] | None = None
+    """What this agent may do. None means "use the defaults for its role"."""
     worktree: bool = False
     """Whether this agent gets an isolated git worktree (phase 6)."""
 
@@ -175,6 +177,13 @@ orchestrator:
 
 # Only "claude" is implemented today. The section exists so other agent CLIs
 # (codex, gemini, ollama) can be plugged in later without config churn.
+# What each agent is allowed to do. Omit an agent's list to use the defaults for
+# its role; see schemas/capabilities.py. Enforced in code, not just in prompts.
+#
+# agents:
+#   reviewer:
+#     capabilities: [read_files, run_tests, git_diff, message_agent]
+
 # How much context an agent carries between tasks.
 context:
   max_tasks_per_session: 8

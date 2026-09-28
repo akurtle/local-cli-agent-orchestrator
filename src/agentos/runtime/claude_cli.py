@@ -190,6 +190,11 @@ class ClaudeRunner:
         if request.allowed_tools:
             argv += ["--allowedTools", *request.allowed_tools]
 
+        # Capability enforcement: the agent cannot use a tool it was denied, so a
+        # missing permission is prevented rather than merely discouraged.
+        if request.disallowed_tools:
+            argv += ["--disallowedTools", *request.disallowed_tools]
+
         argv += self.extra_args
         return argv, session_id
 

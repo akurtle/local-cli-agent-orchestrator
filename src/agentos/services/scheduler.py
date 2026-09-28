@@ -22,7 +22,9 @@ from agentos.services import dag
 from agentos.services.agents import AgentBusy, AgentPaused, AgentService
 from agentos.services.context_service import ContextService
 from agentos.services.memory import MemoryService
+from agentos.schemas.capabilities import Capability
 from agentos.services.messages import MessageService
+from agentos.services.permissions import PermissionService
 from agentos.services.results import ResultProcessor, build_repair_prompt
 from agentos.services.tasks import TaskService
 from agentos.services.workspaces import WorkspaceService
@@ -35,6 +37,7 @@ class SchedulerEvent:
     """Names for the progress callback, so the CLI can render without guessing."""
 
     DISPATCH = "dispatch"
+    DENIED = "denied"
     COMPLETED = "completed"
     MESSAGE = "message"
     WORKSPACE = "workspace"
@@ -105,6 +108,7 @@ class Scheduler:
         )
         self.workspaces = workspace_service
         self.memory = memory_service or MemoryService(db, config)
+        self.permissions = PermissionService(db, config)
         self.context = context_service or ContextService(
             db, config, task_service, self.memory
         )
@@ -296,6 +300,23 @@ class Scheduler:
                     SchedulerEvent.REJECTED,
                     f"{task.key}: claimed but unchanged: "
                     + ", ".join(report.unverified_claims[:5]),
+                )
+
+            # Detective layer: git shows what really happened, so an edit that
+            # slipped past the tool denial is still caught and recorded.
+            if report.files_changed and not await asyncio.to_thread(
+                self.permissions.check,
+                agent_name,
+                Capability.EDIT_FILES,
+                "edit_files",
+                f"{len(report.files_changed)} file(s) changed without permission: "
+                + ", ".join(report.files_changed[:10]),
+                task.key,
+            ):
+                self._notify(
+                    SchedulerEvent.DENIED,
+                    f"{agent_name} changed {len(report.files_changed)} file(s) "
+                    f"without edit_files ({task.key})",
                 )
             summary = summary + "\n\n" + report.render()
 

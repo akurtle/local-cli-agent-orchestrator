@@ -24,7 +24,9 @@ from agentos.schemas.responses import (
     ResponseParseError,
     parse_agent_response,
 )
+from agentos.schemas.capabilities import Capability
 from agentos.services.messages import MessageService, MessageValidationError
+from agentos.services.permissions import PermissionService
 from agentos.services.tasks import TaskService, TaskValidationError
 
 # An agent may not queue unlimited work in one turn.
@@ -39,12 +41,14 @@ class ResultProcessor:
         config: Config,
         task_service: TaskService,
         message_service: MessageService,
+        permissions: PermissionService | None = None,
     ) -> None:
         self.db = db
         self.config = config
         self.tasks = task_service
         self.messages = message_service
         self.agents = AgentRepository(db)
+        self.permissions = permissions or PermissionService(db, config)
 
     # ------------------------------------------------------------------- parsing
 
@@ -96,6 +100,19 @@ class ResultProcessor:
         rejected: list[str],
     ) -> int:
         sent = 0
+        if response.messages and not self.permissions.check(
+            agent_name,
+            Capability.MESSAGE_AGENT,
+            "message_agent",
+            f"{len(response.messages)} message(s) suppressed",
+            task.key if task else None,
+        ):
+            rejected.append(
+                f"{len(response.messages)} message(s) refused: "
+                f"{agent_name} lacks message_agent"
+            )
+            return 0
+
         for outbound in response.messages[:MAX_MESSAGES]:
             try:
                 self.messages.send(
@@ -150,6 +167,19 @@ class ResultProcessor:
         rejected: list[str],
     ) -> list[str]:
         created: list[str] = []
+        if response.requested_tasks and not self.permissions.check(
+            agent_name,
+            Capability.REQUEST_TASK,
+            "request_task",
+            f"{len(response.requested_tasks)} requested task(s) suppressed",
+            task.key if task else None,
+        ):
+            rejected.append(
+                f"{len(response.requested_tasks)} requested task(s) refused: "
+                f"{agent_name} lacks request_task"
+            )
+            return []
+
         for requested in response.requested_tasks[:MAX_REQUESTED_TASKS]:
             label = requested.title[:60]
             try:

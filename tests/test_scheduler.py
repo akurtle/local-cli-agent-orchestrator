@@ -1135,3 +1135,82 @@ async def test_failed_run_does_not_consume_the_session_budget(db, tmp_path) -> N
     tasks.create_task("doomed", agent="backend")
     await scheduler.run()
     assert scheduler.agents.get_agent("backend").session_task_count == 0
+
+
+# ----------------------------------------------- phase 14: capability enforcement
+
+
+def perms_config(**agents) -> Config:
+    data = {k: dict(v) if isinstance(v, dict) else v for k, v in CONFIG_DICT.items()}
+    data["agents"] = {**CONFIG_DICT["agents"], **agents}
+    return Config.model_validate(data)
+
+
+async def test_message_refused_without_the_capability(db, tmp_path) -> None:
+    """Layer 2: an action asked for in the response block is validated."""
+    config = perms_config(
+        backend={"role": "backend", "capabilities": ["read_files", "edit_files"]}
+    )
+    runtime = RecordingRuntime(
+        messages={"T-1": [{"to": "frontend", "message": "hello"}]}
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    task = tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+
+    assert scheduler.messages.list_all() == []
+    assert any("message_agent" in d for e, d in events if e == "rejected")
+    denials = scheduler.permissions.denials()
+    assert [d.capability for d in denials] == ["message_agent"]
+    assert denials[0].task_key == task.key
+
+
+async def test_requested_task_refused_without_the_capability(db, tmp_path) -> None:
+    config = perms_config(
+        backend={"role": "backend", "capabilities": ["read_files", "edit_files"]}
+    )
+    runtime = RecordingRuntime(
+        requested={"T-1": [{"agent_role": "qa", "title": "Test it"}]}
+    )
+    scheduler, tasks, events = build(db, config, runtime, tmp_path)
+    tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+
+    assert tasks.tasks.count() == 1  # no follow-up created
+    assert any("request_task" in d for e, d in events if e == "rejected")
+    assert [d.capability for d in scheduler.permissions.denials()] == ["request_task"]
+
+
+async def test_permitted_actions_still_work(db, config, tmp_path) -> None:
+    """Enforcement must not break an agent that does have the capability."""
+    runtime = RecordingRuntime(
+        messages={"T-1": [{"to": "frontend", "message": "hello"}]},
+        requested={"T-1": [{"agent_role": "qa", "title": "Test it"}]},
+    )
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("work", agent="backend")
+
+    await scheduler.run()
+
+    assert len(scheduler.messages.list_all()) == 1
+    assert tasks.tasks.count() == 2
+    assert scheduler.permissions.denials() == []
+
+
+async def test_reviewer_is_denied_the_edit_tools(db, config, tmp_path) -> None:
+    """Layer 1, through the scheduler."""
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("review it", agent="reviewer")
+    await scheduler.run()
+    assert "Edit" in runtime.requests[0].disallowed_tools
+
+
+async def test_backend_is_not_denied_the_edit_tools(db, config, tmp_path) -> None:
+    runtime = RecordingRuntime()
+    scheduler, tasks, _ = build(db, config, runtime, tmp_path)
+    tasks.create_task("build it", agent="backend")
+    await scheduler.run()
+    assert runtime.requests[0].disallowed_tools == []

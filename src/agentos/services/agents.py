@@ -20,6 +20,7 @@ from agentos.schemas.dto import AgentRunOutcome, AgentView
 from agentos.schemas.enums import AgentStatus, MemoryCategory, MemoryScope
 from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
 from agentos.services.memory import MemoryService
+from agentos.services.permissions import PermissionService
 from agentos.services.rotation import (
     SUMMARY_INSTRUCTION,
     RotationDecision,
@@ -85,6 +86,7 @@ class AgentService:
         self.agents = AgentRepository(db)
         # Rotation needs somewhere to put what the old session knew.
         self.memory = MemoryService(db, config)
+        self.permissions = PermissionService(db, config)
 
     # ------------------------------------------------------------ config -> db
 
@@ -163,6 +165,7 @@ class AgentService:
             roster=self.roster(),
             project_root=self.project_root,
             explicit_path=section.prompt if section else None,
+            capabilities=self.permissions.capability_prompt(agent),
         )
 
     # ------------------------------------------------------------- transitions
@@ -436,6 +439,7 @@ class AgentService:
             cwd=working_dir,
             model=agent.model,
             timeout_seconds=timeout,
+            disallowed_tools=self.permissions.grants_for(agent).denied_tools,
             stream=True,
         )
         return await self.runtime.run(request, on_event=on_event)
