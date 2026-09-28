@@ -19,7 +19,11 @@ from rich.table import Table
 
 from agentos import __version__
 from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME, STATE_DIRNAME
-from agentos.cli.agent_commands import agent_app, list_agents_command
+from agentos.cli.agent_commands import (
+    agent_app,
+    list_agents_command,
+    pause_agent_command,
+)
 from agentos.cli.context import load_context
 from agentos.cli.git_commands import diff_command, git_app
 from agentos.cli.run_commands import (
@@ -27,11 +31,13 @@ from agentos.cli.run_commands import (
     run_objective_command,
     show_objective_command,
 )
+from agentos.cli.status_commands import logs_command, status_command
 from agentos.cli.message_commands import (
     list_messages_command,
     send_message_command,
 )
 from agentos.cli.task_commands import (
+    cancel_task,
     list_tasks_command,
     task_app,
     work_command,
@@ -55,6 +61,56 @@ console = Console()
 app.add_typer(agent_app)
 app.add_typer(task_app)
 app.add_typer(git_app)
+
+
+@app.command("status")
+def status(
+    watch: Annotated[
+        float | None,
+        typer.Option(
+            "--watch",
+            "-w",
+            help="Refresh every N seconds until interrupted (minimum 1).",
+        ),
+    ] = None,
+) -> None:
+    """Show the project, objectives, agents, tasks and recent messages."""
+    status_command(watch=watch)
+
+
+@app.command("logs")
+def logs(
+    agent: Annotated[str, typer.Argument(help="Agent name.")],
+    limit: Annotated[
+        int, typer.Option("--limit", "-n", help="How many recent runs to show.")
+    ] = 3,
+    raw: Annotated[
+        bool, typer.Option("--raw", help="Dump the captured transcript instead.")
+    ] = False,
+    run_id: Annotated[
+        int | None, typer.Option("--run", help="Show one specific run id.")
+    ] = None,
+) -> None:
+    """Show an agent's recent runs."""
+    logs_command(agent, limit=limit, raw=raw, run_id=run_id)
+
+
+@app.command("pause")
+def pause(agent: Annotated[str, typer.Argument(help="Agent name.")]) -> None:
+    """Stop assigning work to an agent."""
+    pause_agent_command(agent, paused=True)
+
+
+@app.command("resume")
+def resume(agent: Annotated[str, typer.Argument(help="Agent name.")]) -> None:
+    """Allow an agent to take work again."""
+    pause_agent_command(agent, paused=False)
+
+
+@app.command("cancel")
+def cancel(key: Annotated[str, typer.Argument(help="Task key.")]) -> None:
+    """Cancel a task. An alias for `task cancel`."""
+    cancel_task(key)
 
 
 @app.command("agents")

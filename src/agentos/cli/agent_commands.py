@@ -211,3 +211,27 @@ def run_agent(
     ctx.db.dispose()
     if not outcome.ok:
         raise typer.Exit(code=1)
+
+
+def pause_agent_command(name: str, paused: bool) -> None:
+    """Pause or resume one agent.
+
+    A paused agent is skipped by the scheduler; its tasks stay ready and are
+    reported as skipped rather than failed.
+    """
+    ctx = load_context()
+    service = build_agent_service(ctx, preflight=False)
+    try:
+        agent = service.pause(name) if paused else service.unpause(name)
+    except AgentNotFound as exc:
+        console.print(f"[red]{exc}[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=1) from exc
+    except AgentBusy as exc:
+        console.print(f"[yellow]{exc}[/]")
+        console.print("[dim]Wait for the task to finish, or cancel it first.[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"{agent.name} -> {status_text(agent.status)}")
+    ctx.db.dispose()

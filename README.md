@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 7 complete
+## Status: Phase 8 complete
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -30,8 +30,9 @@ follow-up work.
 | 5 | Manager agent planning | **done** |
 | 6 | Git worktree isolation | **done** |
 | 7 | Orchestration loop hardening | **done** |
-| 8 | Rich dashboard | next |
-| 9-12 | Configurable agents, integrator, gates, TUI | |
+| 8 | Rich dashboard | **done** |
+| 9 | Configurable agent definitions | next |
+| 10-12 | Integrator, approval gates, TUI | |
 
 ## Install
 
@@ -43,7 +44,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 416 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 443 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -91,6 +92,17 @@ Agents emit prose plus a delimited JSON block
 changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
+
+### One dashboard, derived not stored
+`agentctl status` shows objectives, agents, a task progress bar, recent messages
+and anything holding a blocker. Every number is computed from services on each
+render, so the view cannot drift from the database. `--watch N` re-renders on a
+timer; WAL mode means those reads never block a running scheduler.
+
+Rendering never decides state and never queries the database directly, and it is
+tested for content rather than exact layout so a column-width change does not
+break the suite. There is a test that every task and objective status renders, so
+adding one later cannot blow up the dashboard.
 
 ### Why a task failed decides what happens next
 `FailureKind` separates the cases the spec asks about, and the retry policy
