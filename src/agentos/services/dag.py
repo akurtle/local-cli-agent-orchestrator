@@ -23,7 +23,12 @@ from agentos.schemas.enums import TaskStatus
 # would make the work look like it is still in flight. Readiness is recomputed
 # from scratch every pass, so this reverses automatically once the chain clears.
 DEAD_STATUSES = frozenset(
-    {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
+    {
+        TaskStatus.FAILED,
+        TaskStatus.FAILED_VERIFICATION,
+        TaskStatus.CANCELLED,
+        TaskStatus.BLOCKED,
+    }
 )
 
 # Statuses whose readiness the scheduler may recompute. Running and terminal
@@ -247,6 +252,13 @@ def is_settled(nodes: dict[int, TaskNode]) -> bool:
     Used to decide when the scheduler should stop rather than spin.
     """
     return not any(
-        node.status in {TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.PENDING}
+        node.status
+        in {
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+            TaskStatus.PENDING,
+            TaskStatus.AGENT_DONE,
+            TaskStatus.VERIFYING,
+        }
         for node in nodes.values()
     )

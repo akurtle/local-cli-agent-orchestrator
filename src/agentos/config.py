@@ -68,6 +68,71 @@ class RuntimeSection(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class VerificationSection(BaseModel):
+    """How an agent's claim of completion is checked.
+
+    Keyed by agent name or role, with a `default` entry as the fallback. Each
+    entry is a list of argv arrays -- never shell strings -- and they run through
+    the same command policy as anything else an agent does.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    require_clean_exit: bool = True
+    """A non-zero exit means the claim is rejected."""
+    timeout_seconds: float = Field(default=600.0, gt=0)
+    verify_criteria: bool = True
+    """Also run acceptance criteria that name a command."""
+
+    def commands_for(self, agent: str, role: str) -> list[list[str]]:
+        """Checks for one agent: its own entry, else its role, else the default.
+
+        Not merged: a specific entry replaces the general one, so an agent that
+        declares its own checks gets exactly those.
+        """
+        for key in (agent, role, "default"):
+            if not key:
+                continue
+            entry = getattr(self, key, None) if key in self.model_extra else None
+            commands = _as_commands(entry)
+            if commands is not None:
+                return commands
+        return []
+
+
+def _as_commands(entry: object) -> list[list[str]] | None:
+    """Read a verification entry, tolerating the shapes people actually write."""
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        raw = entry.get("commands")
+    else:
+        raw = entry
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return []
+
+    commands: list[list[str]] = []
+    for item in raw:
+        if isinstance(item, list):
+            argv = [str(part) for part in item if str(part).strip()]
+        elif isinstance(item, str) and item.strip():
+            # A bare string is accepted and split, because writing
+            # ["pytest", "tests"] for every entry is tedious. It is split here,
+            # never handed to a shell.
+            import shlex
+
+            argv = [p for p in shlex.split(item, posix=False) if p.strip()]
+            argv = [p.strip('"').strip("'") for p in argv]
+        else:
+            continue
+        if argv:
+            commands.append(argv)
+    return commands
+
+
 class CommandsSection(BaseModel):
     """Which development commands agents may run.
 
@@ -157,6 +222,7 @@ class Config(BaseModel):
     approvals: ApprovalsSection = Field(default_factory=ApprovalsSection)
     context: ContextSection = Field(default_factory=ContextSection)
     commands: CommandsSection = Field(default_factory=CommandsSection)
+    verification: VerificationSection = Field(default_factory=VerificationSection)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
 
     @field_validator("runtime", mode="before")
@@ -243,6 +309,16 @@ orchestrator:
 #   auto_replan:
 #     task_failure: false
 #     blocker: false
+
+# How an agent's claim of completion is checked. Keyed by agent name or role,
+# with `default` as the fallback. An agent claiming success does not complete a
+# task until these pass.
+#
+# verification:
+#   backend:
+#     commands: [["pytest", "tests/backend"], ["ruff", "check", "."]]
+#   default:
+#     commands: []
 
 # Which development commands agents may run. Defaults cover the usual test and
 # lint tooling; shells and network tools are denied, and history-rewriting git

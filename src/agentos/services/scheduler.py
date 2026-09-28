@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 from agentos.config import Config
 from agentos.db.session import Database
@@ -28,6 +29,7 @@ from agentos.services.messages import MessageService
 from agentos.services.permissions import PermissionService
 from agentos.services.results import ResultProcessor, build_repair_prompt
 from agentos.services.tasks import TaskService
+from agentos.services.verification import VerificationService
 from agentos.services.workspaces import WorkspaceService
 
 # Agent statuses that can accept a new task.
@@ -41,6 +43,9 @@ class SchedulerEvent:
     DENIED = "denied"
     COMPLETED = "completed"
     MESSAGE = "message"
+    VERIFYING = "verifying"
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
     WORKSPACE = "workspace"
     ROTATED = "rotated"
     REMEMBERED = "remembered"
@@ -98,6 +103,7 @@ class Scheduler:
         context_service: ContextService | None = None,
         memory_service: MemoryService | None = None,
         event_bus: EventBus | None = None,
+        verification_service: VerificationService | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self.db = db
@@ -112,6 +118,7 @@ class Scheduler:
         self.memory = memory_service or MemoryService(db, config)
         self.permissions = PermissionService(db, config)
         self.events = event_bus or EventBus(db)
+        self.verification = verification_service or VerificationService(db, config)
         self.context = context_service or ContextService(
             db, config, task_service, self.memory
         )
@@ -293,6 +300,13 @@ class Scheduler:
         await asyncio.to_thread(self.memory.confirm_handoffs, assembled.handoffs)
 
         summary = result.summary or outcome.text
+
+        # The agent has *claimed* success. Record that, then check it: a claim is
+        # not a fact, and only the checks decide whether the task completes.
+        await asyncio.to_thread(
+            self.tasks.transition, task.id, TaskStatus.AGENT_DONE, None, None
+        )
+
         # Only report changes for an isolated worktree. In a shared project
         # directory, concurrent agents and the orchestrator's own state files all
         # show up as changes, so attributing any of them to this task would be
@@ -345,7 +359,79 @@ class Scheduler:
             summary = summary + "\n\n" + report.render()
 
         await self._record_knowledge(task, agent_name, result)
+
+        verdict = await self._verify(task, agent_name, workspace)
+        if verdict is not None:
+            summary = summary + "\n\n" + verdict.render()
+            if not verdict.passed:
+                reasons = "; ".join(
+                    f"{c.short} {c.detail}".strip() for c in verdict.failures
+                )
+                return (
+                    task,
+                    False,
+                    f"verification failed: {reasons}",
+                    summary,
+                    FailureKind.VERIFICATION_FAILED,
+                )
+
         return task, True, None, summary, None
+
+    async def _verify(self, task: TaskView, agent_name: str, workspace):
+        """Run the configured checks against the agent's claim.
+
+        Returns None when verification is switched off, so the caller can tell
+        "nothing to check" apart from "checked and passed".
+        """
+        if not self.verification.is_enabled():
+            return None
+
+        agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
+        checks, _review, _manual = await asyncio.to_thread(
+            self.verification.plan, task, agent_view.role
+        )
+        if not checks:
+            return None
+
+        await asyncio.to_thread(
+            self.tasks.transition, task.id, TaskStatus.VERIFYING, None, None
+        )
+        self._notify(
+            SchedulerEvent.VERIFYING, f"{task.key}: {len(checks)} check(s)"
+        )
+
+        # Verify where the work happened. Without a worktree that is the project
+        # directory, which is also the boundary the checks may not escape.
+        directory = str(workspace.path) if workspace else str(
+            self.agents.project_root or Path.cwd()
+        )
+        verdict = await self.verification.verify(
+            task=task,
+            cwd=directory,
+            boundary=directory,
+            agent_role=agent_view.role,
+        )
+
+        if verdict.passed:
+            self._notify(SchedulerEvent.VERIFIED, task.key)
+            await self.events.emit_async(
+                EventType.TASK_VERIFIED,
+                summary=f"{len(verdict.checks)} check(s) passed",
+                task_key=task.key,
+                agent=agent_name,
+                objective_id=task.objective_id,
+            )
+        else:
+            detail = "; ".join(c.short for c in verdict.failures)
+            self._notify(SchedulerEvent.UNVERIFIED, f"{task.key}: {detail}")
+            await self.events.emit_async(
+                EventType.TASK_VERIFICATION_FAILED,
+                summary=detail[:200],
+                task_key=task.key,
+                agent=agent_name,
+                objective_id=task.objective_id,
+            )
+        return verdict
 
     async def _record_knowledge(self, task: TaskView, agent_name: str, result) -> None:
         """Persist what should outlive this run, and hand off to dependents.
@@ -541,8 +627,13 @@ class Scheduler:
             )
             return SchedulerEvent.RETRY
 
+        final = (
+            TaskStatus.FAILED_VERIFICATION
+            if kind is FailureKind.VERIFICATION_FAILED
+            else TaskStatus.FAILED
+        )
         await asyncio.to_thread(
-            self.tasks.transition, task.id, TaskStatus.FAILED, None, error or "failed"
+            self.tasks.transition, task.id, final, None, error or "failed"
         )
         suffix = f" [{kind.value}]" if kind else ""
         self._notify(SchedulerEvent.FAILED, f"{task.key}: {error}{suffix}")

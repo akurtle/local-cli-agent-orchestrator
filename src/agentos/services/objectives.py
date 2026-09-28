@@ -26,6 +26,7 @@ from agentos.schemas.plan import ManagerPlan, PlanParseError, parse_manager_plan
 from agentos.services.agents import AgentService
 from agentos.services.planner import Planner, PlanValidation
 from agentos.services.tasks import TaskService
+from agentos.services.verification import VerificationService
 
 # Planning reads the repository, so it needs more headroom than a normal turn.
 DEFAULT_PLANNING_TIMEOUT = 600.0
@@ -72,6 +73,7 @@ class ObjectiveService:
         self.objectives = ObjectiveRepository(db)
         self.task_repo = TaskRepository(db)
         self.planner = Planner(db, config, task_service)
+        self.verification = VerificationService(db, config)
 
     # ------------------------------------------------------------------ planning
 
@@ -199,9 +201,9 @@ class ObjectiveService:
     def refresh_completion(self, objective_id: int) -> ObjectiveView:
         """Recompute an objective's status from its tasks.
 
-        Deterministic, and never asked of an agent: complete when every task
-        completed, failed when any task failed or is permanently blocked with no
-        work left, otherwise active.
+        Deterministic, and never asked of an agent. Complete requires every task
+        completed AND nothing failing verification on its latest attempt; failed
+        when nothing can progress; otherwise active.
         """
         objective = self.objectives.get(objective_id)
         if objective.status in {ObjectiveStatus.PLANNING, ObjectiveStatus.AWAITING_APPROVAL}:
@@ -212,20 +214,39 @@ class ObjectiveService:
             return objective
 
         statuses = {t.status for t in tasks}
-        if statuses == {TaskStatus.COMPLETED}:
-            return self.objectives.set_status(objective_id, ObjectiveStatus.COMPLETED)
 
         unfinished = {
             TaskStatus.PENDING,
             TaskStatus.READY,
             TaskStatus.RUNNING,
             TaskStatus.REVIEW,
+            TaskStatus.AGENT_DONE,
+            TaskStatus.VERIFYING,
         }
         if statuses & unfinished:
             return self.objectives.set_status(objective_id, ObjectiveStatus.ACTIVE)
 
+        if statuses == {TaskStatus.COMPLETED}:
+            # Every task completed. Completion still requires that nothing failed
+            # verification on its latest attempt: a task marked completed while
+            # its checks disagreed would make the objective a lie.
+            unverified = [
+                t.key
+                for t in tasks
+                if not self.verification.passed_for(t.key)
+            ]
+            if unverified:
+                return self.objectives.set_status(
+                    objective_id, ObjectiveStatus.FAILED
+                )
+            return self.objectives.set_status(objective_id, ObjectiveStatus.COMPLETED)
+
         # Nothing left to run, and not everything succeeded.
-        if statuses & {TaskStatus.FAILED, TaskStatus.BLOCKED}:
+        if statuses & {
+            TaskStatus.FAILED,
+            TaskStatus.FAILED_VERIFICATION,
+            TaskStatus.BLOCKED,
+        }:
             return self.objectives.set_status(objective_id, ObjectiveStatus.FAILED)
         if statuses == {TaskStatus.CANCELLED}:
             return self.objectives.set_status(objective_id, ObjectiveStatus.CANCELLED)

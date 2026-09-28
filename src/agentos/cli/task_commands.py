@@ -41,6 +41,9 @@ STATUS_COLOURS = {
     TaskStatus.PENDING: "bright_black",
     TaskStatus.READY: "blue",
     TaskStatus.RUNNING: "cyan",
+    TaskStatus.AGENT_DONE: "bright_cyan",
+    TaskStatus.VERIFYING: "bright_blue",
+    TaskStatus.FAILED_VERIFICATION: "red",
     TaskStatus.BLOCKED: "yellow",
     TaskStatus.REVIEW: "magenta",
     TaskStatus.COMPLETED: "green",
@@ -51,6 +54,9 @@ STATUS_COLOURS = {
 STATUS_GLYPHS = {
     TaskStatus.COMPLETED: "check",
     TaskStatus.FAILED: "cross",
+    TaskStatus.FAILED_VERIFICATION: "cross",
+    TaskStatus.AGENT_DONE: "filled",
+    TaskStatus.VERIFYING: "filled",
     TaskStatus.RUNNING: "filled",
     TaskStatus.CANCELLED: "dash",
 }
@@ -223,6 +229,36 @@ def show_task(key: Annotated[str, typer.Argument(help="Task key, e.g. AUTH-1.")]
         console.print(Panel(safe(task.result), title="result", border_style="green"))
     if task.error:
         console.print(Panel(safe(task.error), title="error", border_style="red"))
+
+    from agentos.services.verification import VerificationService
+
+    checks = VerificationService(ctx.db, ctx.config).history(task_key=task.key)
+    if checks:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Attempt", justify="right")
+        table.add_column("Status")
+        table.add_column("Exit", justify="right")
+        table.add_column("Source")
+        table.add_column("Check", overflow="fold")
+        colours = {
+            "passed": "green",
+            "failed": "red",
+            "error": "red",
+            "skipped": "yellow",
+        }
+        for record in checks:
+            colour = colours.get(record.status, "white")
+            table.add_row(
+                str(record.attempt),
+                f"[{colour}]{record.status}[/]",
+                "-" if record.exit_code is None else str(record.exit_code),
+                record.source,
+                safe(record.spelled),
+            )
+        console.print(table)
+        console.print(
+            "[dim]An agent claiming success does not complete a task; these do.[/]"
+        )
     ctx.db.dispose()
 
 

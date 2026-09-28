@@ -26,6 +26,22 @@ from agentos.schemas.capabilities import (
 )
 from agentos.schemas.dto import AgentView
 
+# Principals that are the orchestrator itself rather than an agent. Verification
+# acts on the operator's behalf, so it is not limited by the capabilities of the
+# agent whose claim it is checking -- a reviewer without run_command must still
+# have its work verified. These are still subject to the command policy.
+INTERNAL_PRINCIPALS: dict[str, frozenset[Capability]] = {
+    "verification": frozenset(
+        {
+            Capability.READ_FILES,
+            Capability.RUN_COMMAND,
+            Capability.RUN_TESTS,
+            Capability.GIT_DIFF,
+            Capability.INSPECT_REPO,
+        }
+    ),
+}
+
 
 @dataclass(frozen=True)
 class DenialRecord:
@@ -76,6 +92,16 @@ class PermissionService:
     def grants_for(self, agent: AgentView | str, role: str | None = None) -> Grants:
         """Everything this agent may do."""
         name = agent if isinstance(agent, str) else agent.name
+
+        internal = INTERNAL_PRINCIPALS.get(name)
+        if internal is not None:
+            return Grants(
+                agent=name,
+                role="orchestrator",
+                capabilities=internal,
+                source="internal principal",
+            )
+
         agent_role = role or (agent.role if not isinstance(agent, str) else "")
 
         section = self.config.agents.get(name)

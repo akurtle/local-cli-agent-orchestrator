@@ -137,6 +137,19 @@ def build_status(ctx, service, task_service, message_service, objective_service)
         summary = ", ".join(f"{name} ({n})" for name, n in sorted(unread.items()))
         sections.append(Text(f"unread: {summary}", style="dim"))
 
+    rejected = [t for t in tasks if t.status is TaskStatus.FAILED_VERIFICATION]
+    if rejected:
+        body = Text()
+        for task in rejected:
+            body.append(f"{task.key} ", style="bold red")
+            body.append(safe(task.error or "checks disagreed") + "\n")
+        body.append(
+            "The agent claimed success; verification said otherwise.", style="dim"
+        )
+        sections.append(
+            Panel(body, title="failed verification", border_style="red")
+        )
+
     needs_help = [t for t in tasks if t.needs_intervention]
     if needs_help:
         body = Text()

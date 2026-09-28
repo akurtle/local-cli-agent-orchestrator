@@ -31,6 +31,8 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.RUNNING: frozenset(
         {
+            TaskStatus.AGENT_DONE,
+            TaskStatus.VERIFYING,
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
             TaskStatus.BLOCKED,
@@ -38,6 +40,28 @@ TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.READY,
             TaskStatus.CANCELLED,
         }
+    ),
+    # The agent has claimed success; only verification decides what happens next.
+    TaskStatus.AGENT_DONE: frozenset(
+        {
+            TaskStatus.VERIFYING,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED_VERIFICATION,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    TaskStatus.VERIFYING: frozenset(
+        {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED_VERIFICATION,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    # A rejected claim can be worked on again, but is never silently completed.
+    TaskStatus.FAILED_VERIFICATION: frozenset(
+        {TaskStatus.READY, TaskStatus.PENDING, TaskStatus.CANCELLED}
     ),
     TaskStatus.BLOCKED: frozenset(
         {TaskStatus.READY, TaskStatus.PENDING, TaskStatus.CANCELLED}

@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: phase 17 complete (of an ongoing production-hardening series)
+## Status: phase 18 complete (of an ongoing production-hardening series)
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -41,6 +41,7 @@ actions that matter, and there is both a Rich CLI and a Textual dashboard.
 | 15 | Safe command execution | **done** |
 | 16 | Event bus and observability | **done** |
 | 17 | Replanning and failure recovery | **done** |
+| 18 | Verification pipeline | **done** |
 
 ## Install
 
@@ -80,7 +81,7 @@ agentctl pause|resume <agent>               take an agent out of rotation
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 777 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 823 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -192,6 +193,36 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### An agent's claim is not a fact
+`status: completed` in a response block moves a task to `agent_done` and no
+further. The orchestrator then runs the configured checks and decides:
+
+```
+RUNNING -> AGENT_DONE -> VERIFYING -> COMPLETED
+                                   -> FAILED_VERIFICATION
+```
+
+`failed_verification` blocks dependents exactly like a failure, so downstream work
+cannot proceed on unverified output, and an objective cannot complete while any
+task failed its checks on the latest attempt.
+
+Acceptance criteria are split honestly rather than pretended to be checkable:
+`automated` (it names a command), `review` (it asks for judgement), `manual`
+(everything else). Only automated criteria feed the verdict; the rest are reported
+so nobody mistakes "the tests passed" for "every criterion was met". Classification
+is deliberately conservative -- "Tests pass" is *not* automated, because guessing
+which command that means would invent a check nobody asked for.
+
+Three distinctions the verdict keeps straight: a **failed** check rejects the
+claim; an **error** (the check could not run) also rejects it, because that is not
+evidence the work is fine; a **skipped** check (denied by policy) gives no grounds
+to reject but does not count as verification either. With nothing configured, a
+task still completes -- otherwise every project without a test command would stall.
+
+Checks run through the same command policy, directory boundary and timeout as
+anything else, but as an internal principal rather than as the agent, so a reviewer
+without `run_command` still has its work verified.
 
 ### Replanning mutates the graph, under supervision
 After a failure the manager can be asked to repair the plan. It returns
@@ -503,6 +534,8 @@ src/agentos/
   services/metrics.py     figures derived from stored rows, never accumulated
   services/replanner.py   PURE graph-mutation validation + application
   services/replan_service.py  ask the manager, validate, apply
+  schemas/verification.py PURE criterion classification and verdict logic
+  services/verification.py  runs the checks, records them, decides
   tui/snapshot.py    everything the dashboard shows, gathered from services
   tui/app.py         Textual widgets; display only
 tests/

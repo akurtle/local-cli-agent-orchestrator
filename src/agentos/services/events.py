@@ -51,6 +51,10 @@ class EventType(StrEnum):
     TASK_CANCELLED = "task.cancelled"
     TASK_RETRIED = "task.retried"
     TASK_UNBLOCKED = "task.unblocked"
+    TASK_AGENT_DONE = "task.agent_done"
+    TASK_VERIFYING = "task.verifying"
+    TASK_VERIFIED = "task.verified"
+    TASK_VERIFICATION_FAILED = "task.verification_failed"
 
     AGENT_STARTED = "agent.started"
     AGENT_IDLE = "agent.idle"

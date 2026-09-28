@@ -387,3 +387,34 @@ class Event(Base):
 
     def __repr__(self) -> str:
         return f"<Event {self.type}>"
+
+
+class Verification(Base):
+    """One check run against an agent's claim of completion."""
+
+    __tablename__ = "verifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), default=None, index=True
+    )
+    task_key: Mapped[str] = mapped_column(String(64), default="", index=True)
+    agent: Mapped[str] = mapped_column(String(64), default="")
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    """Which attempt at the task this verified, so history is not overwritten."""
+
+    command: Mapped[str] = mapped_column(Text, default="")
+    """JSON-encoded argv. Stored for audit, never re-executed as a string."""
+    source: Mapped[str] = mapped_column(String(24), default="config")
+
+    status: Mapped[str] = mapped_column(String(16), default="skipped", index=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, default=None)
+    stdout: Mapped[str] = mapped_column(Text, default="")
+    stderr: Mapped[str] = mapped_column(Text, default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+
+    started_at: Mapped[datetime] = mapped_column(default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    def __repr__(self) -> str:
+        return f"<Verification {self.task_key} {self.status}>"
