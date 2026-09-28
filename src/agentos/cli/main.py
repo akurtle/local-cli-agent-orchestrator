@@ -1,0 +1,310 @@
+"""The `agentctl` command line.
+
+Phase 1 scope: init, doctor, claude-test, runs, run-show. Agent/task/message
+commands arrive in later phases.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from agentos import __version__
+from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
+from agentos.cli.context import load_context
+from agentos.config import default_config_yaml
+from agentos.db.models import Run
+from agentos.paths import ProjectPaths
+from agentos.runtime.base import RuntimeNotAvailable
+from agentos.runtime.registry import build_runtime
+from agentos.schemas.runtime import RunRequest
+from agentos.services.runs import record_run
+
+app = typer.Typer(
+    name=CLI_NAME,
+    help=f"{APP_NAME}: orchestrate multiple Claude CLI agents locally.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+console = Console()
+
+
+def _run_async(coro):
+    """Run a coroutine from sync Typer code.
+
+    Note: we deliberately do NOT install WindowsSelectorEventLoopPolicy.
+    asyncio subprocesses require the Proactor loop on Windows, which is the
+    default -- switching policies would break process spawning entirely.
+    """
+    return asyncio.run(coro)
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool, typer.Option("--version", help="Show version and exit.")
+    ] = False,
+) -> None:
+    if version:
+        console.print(f"{APP_NAME} {__version__}")
+        raise typer.Exit()
+
+
+# --------------------------------------------------------------------- init
+
+
+@app.command()
+def init(
+    name: Annotated[
+        str | None, typer.Option("--name", help="Project name.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing config.")
+    ] = False,
+) -> None:
+    """Create a project config and initialise the SQLite database."""
+    root = Path.cwd()
+    paths = ProjectPaths(root=root)
+    project_name = name or root.name
+
+    if paths.config_file.exists() and not force:
+        console.print(
+            f"[yellow]{CONFIG_FILENAME} already exists.[/] "
+            "Use --force to overwrite."
+        )
+    else:
+        paths.config_file.write_text(
+            default_config_yaml(project_name), encoding="utf-8"
+        )
+        console.print(f"[green]Wrote[/] {paths.config_file}")
+
+    paths.ensure()
+    from agentos.db.session import Database
+
+    db = Database(paths.db_file)
+    db.create_all()
+    db.dispose()
+    console.print(f"[green]Initialised database[/] {paths.db_file}")
+    console.print(f"\nNext: [bold]{CLI_NAME} doctor[/]")
+
+
+# ------------------------------------------------------------------- doctor
+
+
+@app.command()
+def doctor() -> None:
+    """Check that the project, database and agent runtime are all usable."""
+    ctx = load_context()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail", overflow="fold")
+
+    table.add_row("config", "[green]ok[/]", str(ctx.paths.config_file))
+    table.add_row("project", "[green]ok[/]", ctx.config.project.name)
+    table.add_row("database", "[green]ok[/]", str(ctx.paths.db_file))
+    table.add_row(
+        "agents configured",
+        "[green]ok[/]" if ctx.config.agents else "[yellow]none[/]",
+        ", ".join(sorted(ctx.config.agents)) or "(add some to the config)",
+    )
+
+    exit_code = 0
+    try:
+        runtime = build_runtime(ctx.config)
+        info = runtime.preflight()
+        table.add_row("runtime", "[green]ok[/]", info.get("runtime", "?"))
+        table.add_row("executable", "[green]ok[/]", info.get("executable", "?"))
+        table.add_row("version", "[green]ok[/]", info.get("version", "?"))
+        table.add_row("auth", "[green]ok[/]", info.get("auth", "?"))
+    except RuntimeNotAvailable as exc:
+        table.add_row("runtime", "[red]FAIL[/]", str(exc))
+        exit_code = 1
+
+    console.print(table)
+    ctx.db.dispose()
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
+# -------------------------------------------------------------- claude-test
+
+
+@app.command("claude-test")
+def claude_test(
+    prompt: Annotated[str, typer.Argument(help="Prompt to send.")],
+    model: Annotated[
+        str | None, typer.Option("--model", help="Override the model.")
+    ] = None,
+    session: Annotated[
+        str | None,
+        typer.Option("--session", help="Resume this session id instead of starting one."),
+    ] = None,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", help="Seconds before giving up.")
+    ] = None,
+    show_events: Annotated[
+        bool, typer.Option("--events", help="Print each stream event as it arrives.")
+    ] = False,
+) -> None:
+    """Send one prompt through the runtime and persist it as a Run.
+
+    This is the Phase 1 end-to-end proof: config -> runtime -> subprocess ->
+    stream parsing -> database.
+    """
+    ctx = load_context()
+    try:
+        runtime = build_runtime(ctx.config)
+        runtime.preflight()
+    except RuntimeNotAvailable as exc:
+        console.print(f"[red]Runtime unavailable:[/] {exc}")
+        ctx.db.dispose()
+        raise typer.Exit(code=1) from exc
+
+    request = RunRequest(
+        prompt=prompt,
+        session_id=session,
+        resume=session is not None,
+        cwd=str(ctx.paths.root),
+        model=model,
+        timeout_seconds=timeout or ctx.config.orchestrator.default_timeout_seconds,
+        stream=True,
+    )
+
+    def on_event(event) -> None:
+        if show_events:
+            label = event.subtype or ""
+            console.print(f"[dim]event[/] {event.type}{'/' + label if label else ''}")
+
+    with console.status("Running agent..."):
+        result = _run_async(runtime.run(request, on_event=on_event))
+
+    run_id = record_run(ctx.db, result, runtime=runtime.name)
+
+    colour = "green" if result.ok else "red"
+    console.print(
+        Panel(
+            result.text or "[dim](no text returned)[/]",
+            title=f"[{colour}]{result.status.value}[/]",
+            border_style=colour,
+        )
+    )
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="bold")
+    summary.add_column()
+    summary.add_row("run id", str(run_id))
+    summary.add_row("session", result.session_id or "-")
+    summary.add_row("exit code", str(result.exit_code))
+    summary.add_row("events", str(len(result.events)))
+    duration = result.duration_seconds
+    summary.add_row("duration", f"{duration:.2f}s" if duration else "-")
+    if result.cost_usd is not None:
+        summary.add_row("cost", f"${result.cost_usd:.4f}")
+    if result.error:
+        summary.add_row("error", f"[red]{result.error}[/]")
+    console.print(summary)
+
+    if result.stderr.strip():
+        console.print(f"[dim]stderr:[/] {result.stderr.strip()[:1000]}")
+
+    ctx.db.dispose()
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+# ----------------------------------------------------------------- run logs
+
+
+@app.command("runs")
+def list_runs(
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
+) -> None:
+    """List recorded runs, newest first."""
+    ctx = load_context()
+    with ctx.db.session() as session:
+        rows = (
+            session.query(Run).order_by(Run.id.desc()).limit(max(1, limit)).all()
+        )
+
+    if not rows:
+        console.print("[dim]No runs recorded yet.[/]")
+        ctx.db.dispose()
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("id", justify="right")
+    table.add_column("status")
+    table.add_column("exit", justify="right")
+    table.add_column("started")
+    table.add_column("session", overflow="fold")
+    table.add_column("text", overflow="ellipsis", max_width=48)
+
+    for row in rows:
+        colour = {"succeeded": "green", "failed": "red", "timeout": "yellow"}.get(
+            row.status, "white"
+        )
+        table.add_row(
+            str(row.id),
+            f"[{colour}]{row.status}[/]",
+            "-" if row.exit_code is None else str(row.exit_code),
+            row.started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            (row.session_id or "-")[:8],
+            (row.result_text or "").replace("\n", " ")[:200],
+        )
+    console.print(table)
+    ctx.db.dispose()
+
+
+@app.command("run-show")
+def show_run(
+    run_id: Annotated[int, typer.Argument(help="Run id from `runs`.")],
+    raw: Annotated[
+        bool, typer.Option("--raw", help="Dump captured stdout instead.")
+    ] = False,
+) -> None:
+    """Show the detail of one recorded run."""
+    ctx = load_context()
+    with ctx.db.session() as session:
+        row = session.get(Run, run_id)
+        if row is None:
+            console.print(f"[red]No run with id {run_id}.[/]")
+            ctx.db.dispose()
+            raise typer.Exit(code=1)
+
+        if raw:
+            sys.stdout.write(row.stdout)
+            ctx.db.dispose()
+            return
+
+        console.print(f"[bold]Run {row.id}[/]  ({row.runtime})")
+        console.print(f"Status:    {row.status}")
+        console.print(f"Exit code: {row.exit_code}")
+        console.print(f"Session:   {row.session_id}")
+        console.print(f"Started:   {row.started_at}")
+        console.print(f"Finished:  {row.finished_at}")
+        if row.cost_usd is not None:
+            console.print(f"Cost:      ${row.cost_usd:.4f}")
+        try:
+            argv = json.loads(row.command)
+            console.print(f"Command:   {' '.join(argv)}")
+        except (json.JSONDecodeError, TypeError):
+            console.print(f"Command:   {row.command}")
+        if row.error:
+            console.print(f"[red]Error:     {row.error}[/]")
+        console.print(Panel(row.result_text or "[dim](empty)[/]", title="result"))
+        if row.stderr.strip():
+            console.print(Panel(row.stderr.strip()[:4000], title="stderr"))
+    ctx.db.dispose()
+
+
+if __name__ == "__main__":
+    app()

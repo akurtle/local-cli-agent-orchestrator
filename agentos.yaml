@@ -1,0 +1,27 @@
+project:
+  name: Orchestrator Dev
+  description: ""
+
+orchestrator:
+  max_concurrent_agents: 3
+  default_timeout_seconds: 900
+  max_task_retries: 1
+
+# Only "claude" is implemented today. The section exists so other agent CLIs
+# (codex, gemini, ollama) can be plugged in later without config churn.
+runtime:
+  name: claude
+  # executable: C:/path/to/claude.exe   # optional; resolved from PATH if unset
+  # model: claude-sonnet-5
+
+agents:
+  manager:
+    role: manager
+  backend:
+    role: backend
+  frontend:
+    role: frontend
+  qa:
+    role: qa
+  reviewer:
+    role: reviewer
