@@ -84,6 +84,11 @@ class AgentService:
         Returns (all agents, names newly created). Config owns *definitions*;
         the database owns *state*, so an existing agent keeps its session and
         status across a sync.
+
+        An agent that has been removed from the config is marked OFFLINE rather
+        than deleted: its runs and session are history worth keeping, but it must
+        stop being eligible for work. Removing it outright would orphan its run
+        records and its worktree.
         """
         created: list[str] = []
         for name, section in self.config.agents.items():
@@ -96,7 +101,25 @@ class AgentService:
             )
             if was_created:
                 created.append(name)
+
+        self._retire_unconfigured()
         return self.agents.list(), created
+
+    def _retire_unconfigured(self) -> list[str]:
+        """Take agents no longer in the config out of circulation."""
+        retired: list[str] = []
+        for view in self.agents.list():
+            if view.name in self.config.agents:
+                # A returning agent becomes available again.
+                if view.status is AgentStatus.OFFLINE:
+                    self.agents.set_status(view.name, AgentStatus.IDLE)
+                continue
+            if view.status is not AgentStatus.OFFLINE:
+                self.agents.set_status(
+                    view.name, AgentStatus.OFFLINE, clear_task=True
+                )
+                retired.append(view.name)
+        return retired
 
     def list_agents(self) -> list[AgentView]:
         return self.agents.list()

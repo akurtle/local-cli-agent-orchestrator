@@ -28,6 +28,8 @@ class OrchestratorSection(BaseModel):
     max_concurrent_agents: int = Field(default=3, ge=1, le=32)
     default_timeout_seconds: float = Field(default=900.0, gt=0)
     max_task_retries: int = Field(default=1, ge=0, le=10)
+    manager_role: str = Field(default="manager", min_length=1)
+    """Which role plans objectives. Rename it if your roster uses another word."""
 
 
 class RuntimeSection(BaseModel):
@@ -66,6 +68,18 @@ class Config(BaseModel):
     runtime: RuntimeSection = Field(default_factory=RuntimeSection)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
 
+    @field_validator("runtime", mode="before")
+    @classmethod
+    def _accept_runtime_shorthand(cls, value: object) -> object:
+        """Allow `runtime: claude` as well as `runtime: {name: claude}`.
+
+        The scalar form is what most configs want, and rejecting it would be a
+        pointless papercut.
+        """
+        if isinstance(value, str):
+            return {"name": value}
+        return value
+
     @field_validator("agents")
     @classmethod
     def _non_empty_names(
@@ -78,6 +92,11 @@ class Config(BaseModel):
 
     def role_names(self) -> set[str]:
         return {a.role for a in self.agents.values()}
+
+    def agents_with_role(self, role: str) -> list[str]:
+        return sorted(
+            name for name, section in self.agents.items() if section.role == role
+        )
 
 
 class ConfigError(RuntimeError):
@@ -100,7 +119,11 @@ def load_config(path: Path) -> Config:
 
 
 def default_config_yaml(project_name: str) -> str:
-    """The starter config written by `agentctl init`."""
+    """The starter config written by `agentctl init`.
+
+    The five default agents are a convenience, not a requirement: roles are
+    arbitrary strings, and an unknown role gets a neutral prompt.
+    """
     agent_lines = "\n".join(
         f"  {role}:\n    role: {role}" for role in DEFAULT_ROLES
     )

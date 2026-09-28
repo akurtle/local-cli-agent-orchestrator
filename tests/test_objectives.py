@@ -240,7 +240,7 @@ def test_ambiguous_manager_role_is_reported(db, tmp_path) -> None:
         {"agents": {"boss": {"role": "manager"}, "chief": {"role": "manager"}}}
     )
     service = build(db, config, ScriptedManager(GOOD_PLAN), tmp_path)
-    with pytest.raises(ValueError, match="several agents have the manager role"):
+    with pytest.raises(ValueError, match="several agents have the .manager. role"):
         service.manager_name()
 
 

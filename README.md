@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 8 complete
+## Status: Phase 9 complete
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -31,8 +31,9 @@ follow-up work.
 | 6 | Git worktree isolation | **done** |
 | 7 | Orchestration loop hardening | **done** |
 | 8 | Rich dashboard | **done** |
-| 9 | Configurable agent definitions | next |
-| 10-12 | Integrator, approval gates, TUI | |
+| 9 | Configurable agent definitions | **done** |
+| 10 | Integrator agent | next |
+| 11-12 | Approval gates, TUI | |
 
 ## Install
 
@@ -44,7 +45,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 443 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 458 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -92,6 +93,17 @@ Agents emit prose plus a delimited JSON block
 changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
+
+### Roles are arbitrary strings
+The five starter agents are a convenience, not a requirement. A role is any
+string; an unrecognised one gets a neutral brief, so `database`, `mobile` or
+`security` work with no code change. Each agent may point at its own prompt file.
+Even the planning role is configurable via `orchestrator.manager_role`, so a
+roster whose lead is called `architect` needs nothing special.
+
+An agent removed from the config is marked `offline` rather than deleted: its runs
+and session are history worth keeping, but it stops being eligible for work.
+Putting it back in the config brings it online again.
 
 ### One dashboard, derived not stored
 `agentctl status` shows objectives, agents, a task progress bar, recent messages

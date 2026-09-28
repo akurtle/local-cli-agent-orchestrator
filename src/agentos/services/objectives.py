@@ -78,24 +78,29 @@ class ObjectiveService:
     def manager_name(self) -> str:
         """The agent that plans.
 
-        Prefers an agent whose role is `manager`; falls back to one literally
-        named manager. Raises if neither exists, rather than guessing.
+        The planning role is configurable (`orchestrator.manager_role`), so a
+        roster that calls it `lead` or `architect` works without code changes.
+        Prefers an agent with that role, falls back to one literally named after
+        it, and raises rather than guessing when the choice is ambiguous.
         """
-        candidates = self.agents.agents.find_by_role("manager")
+        role = self.config.orchestrator.manager_role
+        candidates = self.agents.agents.find_by_role(role)
         if len(candidates) == 1:
             return candidates[0].name
         if len(candidates) > 1:
             names = ", ".join(a.name for a in candidates)
             raise ValueError(
-                f"several agents have the manager role ({names}); "
+                f"several agents have the {role!r} role ({names}); "
                 "use --agent to choose one"
             )
-        direct = self.agents.agents.find("manager")
+        direct = self.agents.agents.find(role)
         if direct is not None:
             return direct.name
+        known = ", ".join(sorted(self.config.role_names())) or "none"
         raise ValueError(
-            "no agent has the 'manager' role. Add one to your config to use "
-            "`agentctl run`."
+            f"no agent has the {role!r} role, so there is nobody to plan with. "
+            f"Configured roles: {known}. Add one, set "
+            "orchestrator.manager_role, or pass --agent."
         )
 
     async def propose(
