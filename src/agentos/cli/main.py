@@ -19,6 +19,7 @@ from rich.table import Table
 
 from agentos import __version__
 from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
+from agentos.cli.agent_commands import agent_app, list_agents_command
 from agentos.cli.context import load_context
 from agentos.config import default_config_yaml
 from agentos.db.models import Run
@@ -35,6 +36,14 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+app.add_typer(agent_app)
+
+
+@app.command("agents")
+def agents() -> None:
+    """List all agents with their role, status and session."""
+    list_agents_command()
 
 
 def _run_async(coro):

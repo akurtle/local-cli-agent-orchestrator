@@ -36,6 +36,14 @@ from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
 # Cap retained output so one chatty agent cannot bloat the database.
 MAX_CAPTURED_CHARS = 2_000_000
 
+# Emitted by the CLI when --resume names a conversation it cannot find. Verified
+# against claude 2.1.x, which prints this as plain text and exits 1 without any
+# JSON, so it cannot be detected structurally.
+STALE_SESSION_MARKERS = (
+    "no conversation found with session id",
+    "no conversation found",
+)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -425,6 +433,37 @@ class ClaudeRunner:
                 break
             yield event
         await task
+
+    async def resume(
+        self,
+        session_id: str,
+        prompt: str,
+        on_event: Callable[[StreamEvent], None] | None = None,
+        **overrides: object,
+    ) -> RunResult:
+        """Continue an existing session.
+
+        Thin wrapper over `run` so there is still exactly one execution path.
+        """
+        request = RunRequest(
+            prompt=prompt, session_id=session_id, resume=True, **overrides
+        )
+        return await self.run(request, on_event=on_event)
+
+    @staticmethod
+    def is_stale_session(result: RunResult) -> bool:
+        """True when a resume failed because the session no longer exists.
+
+        The CLI reports this as plain text on stdout with exit 1 and emits no
+        JSON, so we match on its message. Deliberately narrow: a genuine failure
+        must not be mistaken for a stale session and silently retried.
+        """
+        if result.status is RunStatus.SUCCEEDED:
+            return False
+        haystack = " ".join(
+            (result.text, result.stdout, result.stderr)
+        ).lower()
+        return any(marker in haystack for marker in STALE_SESSION_MARKERS)
 
     # ----------------------------------------------------------------- teardown
 

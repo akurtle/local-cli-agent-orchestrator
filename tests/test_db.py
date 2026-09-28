@@ -116,3 +116,33 @@ def test_task_status_terminal_flags() -> None:
     assert TaskStatus.CANCELLED.is_terminal
     assert not TaskStatus.RUNNING.is_terminal
     assert not TaskStatus.READY.is_terminal
+
+
+async def test_database_is_usable_from_worker_threads(tmp_path) -> None:
+    """Regression: async callers move DB work onto threads via asyncio.to_thread.
+
+    SQLite's default same-thread check rejected this, which would have broken
+    concurrent agent execution. Uses a file-backed database because that is the
+    real production configuration (a pool with one connection per thread).
+    """
+    import asyncio
+
+    db = Database(tmp_path / "threads.db")
+    db.create_all()
+
+    def write(key: str) -> int:
+        with db.session() as session:
+            task = Task(key=key, title=key)
+            session.add(task)
+            session.flush()
+            return task.id
+
+    ids = await asyncio.gather(*(asyncio.to_thread(write, f"T-{i}") for i in range(8)))
+    assert len(set(ids)) == 8
+
+    def count() -> int:
+        with db.session() as session:
+            return session.query(Task).count()
+
+    assert await asyncio.to_thread(count) == 8
+    db.dispose()

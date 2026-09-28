@@ -47,6 +47,7 @@ class Agent(Base):
     role: Mapped[str] = mapped_column(String(64), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
 
+    runtime: Mapped[str] = mapped_column(String(32), default="claude")
     session_id: Mapped[str | None] = mapped_column(String(64), default=None)
     status: Mapped[str] = mapped_column(String(16), default=AgentStatus.IDLE.value)
     current_task_id: Mapped[int | None] = mapped_column(

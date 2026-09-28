@@ -52,6 +52,8 @@ class AgentSection(BaseModel):
     role: str
     description: str = ""
     model: str | None = None
+    prompt: str | None = None
+    """Path to a custom role brief, relative to the project root."""
     worktree: bool = False
     """Whether this agent gets an isolated git worktree (phase 6)."""
 

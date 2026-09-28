@@ -11,6 +11,9 @@ from agentos.branding import CLI_NAME, CONFIG_FILENAME
 from agentos.config import Config, ConfigError, load_config
 from agentos.db.session import Database
 from agentos.paths import ProjectPaths, find_project_root
+from agentos.runtime.base import RuntimeNotAvailable
+from agentos.runtime.registry import build_runtime
+from agentos.services.agents import AgentService
 
 
 @dataclass
@@ -43,3 +46,20 @@ def load_context(start: Path | None = None) -> AppContext:
     db = Database(paths.db_file)
     db.create_all()
     return AppContext(paths=paths, config=config, db=db)
+
+
+def build_agent_service(ctx: AppContext, preflight: bool = True) -> AgentService:
+    """Construct the agent service, failing early if the runtime is unusable."""
+    try:
+        runtime = build_runtime(ctx.config)
+        if preflight:
+            runtime.preflight()
+    except RuntimeNotAvailable as exc:
+        typer.secho(f"Runtime unavailable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    return AgentService(
+        db=ctx.db,
+        config=ctx.config,
+        runtime=runtime,
+        project_root=ctx.paths.root,
+    )

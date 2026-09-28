@@ -15,16 +15,16 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 1 complete
+## Status: Phase 2 complete
 
-Foundation only: project layout, SQLite models, schemas, config loader,
-`ClaudeRunner`, and a basic CLI. No scheduler or agent loop yet.
+Persistent agents with independent Claude sessions. No scheduler or task system
+yet -- agents are invoked one at a time by hand.
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Foundation, runtime adapter, CLI | **done** |
-| 2 | Single agent, role prompts, persistent sessions | next |
-| 3 | Tasks, dependencies, scheduler | |
+| 2 | Persistent agents, role prompts, sessions | **done** |
+| 3 | Tasks, dependencies, scheduler | next |
 | 4 | Messaging, inboxes, structured responses | |
 | 5 | Manager agent planning | |
 | 6 | Git worktree isolation | |
@@ -41,7 +41,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 54 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 109 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -80,6 +80,8 @@ the scheduler.
   escalates to `taskkill /T /F` to kill the whole tree rather than orphan it.
 - Pipes are decoded as UTF-8 with `errors="replace"` (the console is cp1252).
 - The executable is resolved via `shutil.which` so `.exe` / `.cmd` shims work.
+- A legacy console is cp1252, where printing `●` raises and kills the
+  command, so glyphs degrade to ASCII and agent text is sanitised before render.
 
 ### Model output is untrusted
 Agents emit prose plus a delimited JSON block
@@ -88,10 +90,37 @@ changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
 
+### Agents: config owns definitions, the database owns state
+`sync_from_config` refreshes an agent's role, description and model from YAML on
+every run, but never touches its `status` or `session_id`. Editing the config
+cannot wipe a live session. Nothing hardcodes the five default roles -- an agent
+with an unknown role gets a neutral brief, so user-defined roles work today.
+
+### Sessions are recovered, not trusted
+A stored session can vanish (cleared history, another machine). The CLI reports
+that as plain text on stdout with exit 1 and no JSON, so `is_stale_session`
+matches on the message and the service starts one fresh session, once, and says
+so. The match is deliberately narrow: a genuine failure is never silently retried.
+
+### Role prompts cannot drift from the parser
+The response-format half of every role prompt is generated from the real
+delimiters and field rules in `schemas/responses.py`. Change the parser and every
+prompt changes with it. The markdown files hold only responsibilities and
+boundaries.
+
+### Additive migrations, not Alembic
+`create_all()` creates missing tables but never alters existing ones, so Phase 2
+adding `agents.runtime` broke every Phase 1 database. `db/migrations.py` checks
+`PRAGMA table_info` and adds missing columns, which is idempotent and preserves
+session IDs and run history. It handles adding a column and nothing else; if a
+drop or type change is ever needed, add Alembic rather than growing that file.
+
 ### Synchronous SQLite, on purpose
 The concurrency problem here is subprocesses, not disk I/O. WAL mode lets
 `agentctl status` read while the orchestrator writes. Async callers wrap short DB
-blocks in `asyncio.to_thread`.
+blocks in `asyncio.to_thread`, so connections cross threads: `check_same_thread`
+is disabled, a file database gets one pooled connection per thread, and an
+in-memory one shares a single connection behind a lock.
 
 ## Layout
 
@@ -105,8 +134,13 @@ src/agentos/
   schemas/           enums, response contract, runtime DTOs
   runtime/base.py    AgentRuntime protocol
   runtime/claude_cli.py   the only module that spawns processes
+  prompts/           role briefs + generated response contract
+  repositories/      all agent SQL; returns DTOs, never ORM rows
+  services/agents.py agent lifecycle, sessions, state transitions
   services/runs.py   run persistence
+  db/migrations.py   additive column migrations
   cli/main.py        agentctl
+  cli/glyphs.py      ASCII fallback for legacy Windows consoles
 tests/
   fixtures/fake_claude.py   stub CLI: tests run offline and free
 ```

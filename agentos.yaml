@@ -1,6 +1,6 @@
 project:
   name: Orchestrator Dev
-  description: ""
+  description: "Local multi-agent orchestration over the Claude Code CLI."
 
 orchestrator:
   max_concurrent_agents: 3
@@ -12,16 +12,27 @@ orchestrator:
 runtime:
   name: claude
   # executable: C:/path/to/claude.exe   # optional; resolved from PATH if unset
-  # model: claude-sonnet-5
+  # Every invocation is metered, so the default is the cheap model. Override per
+  # agent below, or remove this to use your CLI default.
+  model: claude-haiku-4-5-20251001
 
 agents:
   manager:
     role: manager
+    description: Plans and coordinates work. Does not implement.
+
   backend:
     role: backend
+    description: Owns server-side logic, APIs, data models and migrations.
+
   frontend:
     role: frontend
+    description: Owns UI, client state and frontend integrations.
+
   qa:
     role: qa
+    description: Tests implementations and reports failures to their owner.
+
   reviewer:
     role: reviewer
+    description: Reviews completed work against acceptance criteria.

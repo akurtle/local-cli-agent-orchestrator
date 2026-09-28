@@ -38,6 +38,25 @@ class AgentRuntime(Protocol):
         """Execute one turn to completion."""
         ...
 
+    async def resume(
+        self,
+        session_id: str,
+        prompt: str,
+        on_event: Callable[[StreamEvent], None] | None = None,
+        **overrides: object,
+    ) -> RunResult:
+        """Continue an existing session."""
+        ...
+
+    @staticmethod
+    def is_stale_session(result: RunResult) -> bool:
+        """True when the failure was specifically an unknown session id.
+
+        Lets the caller fall back to a fresh session instead of treating a lost
+        conversation as a hard error.
+        """
+        ...
+
     def stream(self, request: RunRequest) -> AsyncIterator[StreamEvent]:
         """Yield events as they arrive."""
         ...
