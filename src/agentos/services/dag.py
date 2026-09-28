@@ -15,9 +15,16 @@ from dataclasses import dataclass, field
 
 from agentos.schemas.enums import TaskStatus
 
-# A dependency in one of these states can never be satisfied, so anything
-# waiting on it is blocked rather than merely pending.
-DEAD_STATUSES = frozenset({TaskStatus.FAILED, TaskStatus.CANCELLED})
+# A dependency in one of these states can never be satisfied as things stand, so
+# anything waiting on it is blocked rather than merely pending.
+#
+# BLOCKED is included so blockage propagates down a chain: if C waits on B and B
+# is blocked by a failed A, then C can never run either, and calling it "pending"
+# would make the work look like it is still in flight. Readiness is recomputed
+# from scratch every pass, so this reverses automatically once the chain clears.
+DEAD_STATUSES = frozenset(
+    {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
+)
 
 # Statuses whose readiness the scheduler may recompute. Running and terminal
 # tasks are left alone.

@@ -346,3 +346,46 @@ def test_tasks_survive_reopen(tmp_path, config: Config) -> None:
     assert reopened.title == "persisted"
     assert reopened.status is TaskStatus.RUNNING
     second.dispose()
+
+
+def test_readiness_propagates_blockage_in_one_call(tasks: TaskService) -> None:
+    """A -> B -> C: failing A must block both B and C, not just B.
+
+    Readiness iterates to a fixed point, because one round only moves blockage
+    a single edge down the chain.
+    """
+    a = tasks.create_task("a", agent="backend")
+    b = tasks.create_task("b", agent="frontend", depends_on=[a.key])
+    c = tasks.create_task("c", agent="manager", depends_on=[b.key])
+
+    tasks.transition(a.key, TaskStatus.RUNNING)
+    tasks.transition(a.key, TaskStatus.FAILED)
+    tasks.refresh_readiness()
+
+    assert tasks.get_task(b.key).status is TaskStatus.BLOCKED
+    assert tasks.get_task(c.key).status is TaskStatus.BLOCKED
+
+
+def test_readiness_unblocks_a_whole_chain(tasks: TaskService) -> None:
+    a = tasks.create_task("a", agent="backend")
+    b = tasks.create_task("b", agent="frontend", depends_on=[a.key])
+    c = tasks.create_task("c", agent="manager", depends_on=[b.key])
+
+    tasks.transition(a.key, TaskStatus.RUNNING)
+    tasks.transition(a.key, TaskStatus.FAILED)
+    tasks.refresh_readiness()
+    tasks.retry(a.key)
+    tasks.transition(a.key, TaskStatus.RUNNING)
+    tasks.transition(a.key, TaskStatus.COMPLETED)
+    tasks.refresh_readiness()
+
+    assert tasks.get_task(b.key).status is TaskStatus.READY
+    # C still waits on B, which has not run yet -- pending, not blocked.
+    assert tasks.get_task(c.key).status is TaskStatus.PENDING
+
+
+def test_readiness_is_idempotent(tasks: TaskService) -> None:
+    a = tasks.create_task("a", agent="backend")
+    tasks.create_task("b", agent="frontend", depends_on=[a.key])
+    tasks.refresh_readiness()
+    assert tasks.refresh_readiness() == []

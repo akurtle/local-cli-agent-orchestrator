@@ -21,6 +21,11 @@ from agentos import __version__
 from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
 from agentos.cli.agent_commands import agent_app, list_agents_command
 from agentos.cli.context import load_context
+from agentos.cli.run_commands import (
+    list_objectives_command,
+    run_objective_command,
+    show_objective_command,
+)
 from agentos.cli.message_commands import (
     list_messages_command,
     send_message_command,
@@ -64,6 +69,47 @@ def tasks(
 ) -> None:
     """List tasks with their status, agent and dependencies."""
     list_tasks_command(status=status)
+
+
+@app.command("run")
+def run_objective(
+    objective: Annotated[str, typer.Argument(help="What you want done.")],
+    auto_approve: Annotated[
+        bool,
+        typer.Option("--auto-approve", "-y", help="Skip the approval prompt."),
+    ] = False,
+    manager: Annotated[
+        str | None, typer.Option("--agent", help="Which agent plans (default: the manager role).")
+    ] = None,
+    work: Annotated[
+        bool, typer.Option("--work", help="Run the scheduler immediately after approval.")
+    ] = False,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", help="Seconds allowed for planning.")
+    ] = None,
+) -> None:
+    """Have the manager plan an objective, then create the tasks once approved."""
+    run_objective_command(
+        objective,
+        auto_approve=auto_approve,
+        manager=manager,
+        then_work=work,
+        timeout=timeout,
+    )
+
+
+@app.command("objectives")
+def objectives() -> None:
+    """List objectives and their progress."""
+    list_objectives_command()
+
+
+@app.command("objective")
+def objective(
+    objective_id: Annotated[int, typer.Argument(help="Objective id.")],
+) -> None:
+    """Show one objective and its tasks."""
+    show_objective_command(objective_id)
 
 
 @app.command("messages")

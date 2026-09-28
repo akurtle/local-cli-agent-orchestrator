@@ -15,19 +15,20 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 3 complete
+## Status: Phase 5 complete
 
-Tasks, dependency-aware scheduling and concurrent execution. Messaging and the
-manager agent are not built yet, so task graphs are still authored by hand.
+The manager decomposes an objective into a validated task graph; agents execute
+it concurrently, message each other and request follow-up work. Git worktree
+isolation (phase 6) is not built yet, so agents share the project directory.
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Foundation, runtime adapter, CLI | **done** |
 | 2 | Persistent agents, role prompts, sessions | **done** |
 | 3 | Tasks, dependencies, scheduler | **done** |
-| 4 | Messaging, inboxes, structured responses | next |
-| 5 | Manager agent planning | |
-| 6 | Git worktree isolation | |
+| 4 | Messaging, inboxes, structured responses | **done** |
+| 5 | Manager agent planning | **done** |
+| 6 | Git worktree isolation | next |
 | 7 | Rich dashboard | |
 | 8 | Textual TUI | |
 
@@ -41,7 +42,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 228 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 350 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -89,6 +90,37 @@ Agents emit prose plus a delimited JSON block
 changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
+
+### Claude proposes, Python applies
+`services/results.py` and `services/planner.py` are the trust boundary. An agent
+asks for messages and follow-up tasks in its response block; a manager proposes a
+plan. Both are validated against the real roster and graph before anything is
+written. An agent cannot name a recipient that does not exist, invent a
+prerequisite, target an ambiguous role, or exceed a per-turn cap, and the manager
+cannot assign work to an agent that is not configured. `validate_plan` is a pure
+function, so every rejection rule is tested without a database.
+
+### delivered is not read
+Message delivery is three-state: `pending`, `delivered` (injected into a prompt
+we actually sent), `read` (the receiving run finished). Marking a message read at
+injection time would lose it whenever a Claude process died mid-run. A failed
+run, a crash, a lost race for the agent or a cancellation all release the
+messages for redelivery.
+
+### One repair attempt, then honesty
+An unparseable reply gets exactly one repair turn whose prompt asks only for the
+response block and forbids further work. If that also fails to parse, the task
+fails -- the orchestrator never records success it cannot verify.
+
+### Objective completion is computed
+An objective is complete when all of its tasks completed, and failed when nothing
+can progress. No agent is ever asked whether the work is done.
+
+### Blockage propagates, reversibly
+A task waiting on a blocked task is itself blocked, so dead work does not look
+like work in flight. `refresh_readiness` iterates to a fixed point because one
+round only moves blockage a single edge down the chain. It reverses automatically
+when the chain clears.
 
 ### Scheduling decisions are pure functions
 `services/dag.py` holds readiness, cycle detection and dispatch selection as
@@ -176,6 +208,10 @@ src/agentos/
   services/agents.py agent lifecycle, sessions, state transitions
   services/dag.py    PURE scheduling logic: readiness, cycles, dispatch order
   services/tasks.py  task creation, validation, status transitions
+  services/messages.py   the message bus and its delivery lifecycle
+  services/results.py    validates agent responses, applies what is allowed
+  services/planner.py    PURE plan validation + temp-id translation
+  services/objectives.py manager planning, approval gate, completion
   services/scheduler.py  async dispatch loop over dag.py decisions
   services/runs.py   run persistence
   runtime/dry_run.py no-op runtime for free scheduling dry runs

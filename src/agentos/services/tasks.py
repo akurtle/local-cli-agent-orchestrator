@@ -207,17 +207,26 @@ class TaskService:
 
     # ---------------------------------------------------------------- readiness
 
-    def refresh_readiness(self) -> list[TaskView]:
+    def refresh_readiness(self, max_rounds: int = 100) -> list[TaskView]:
         """Recompute pending/ready/blocked for the whole graph and persist it.
 
-        The decision itself is made by the pure functions in `dag`; this method
-        only loads and saves.
+        Iterates to a fixed point. One round decides each task from a snapshot,
+        so blockage only moves one edge at a time: marking B blocked does not, in
+        that same round, tell C (which waits on B) anything new. Repeating until
+        nothing changes propagates it all the way down the chain.
+
+        The decisions themselves come from the pure functions in `dag`; this
+        method only loads and saves.
         """
-        nodes = self.tasks.nodes()
         changed: list[TaskView] = []
-        for decision in dag.compute_readiness(nodes):
-            updated = self.tasks.set_status(decision.task_id, decision.status)
-            changed.append(updated)
+        for _round in range(max_rounds):
+            decisions = dag.compute_readiness(self.tasks.nodes())
+            if not decisions:
+                break
+            for decision in decisions:
+                changed.append(
+                    self.tasks.set_status(decision.task_id, decision.status)
+                )
         return changed
 
     def validate_graph(self) -> None:

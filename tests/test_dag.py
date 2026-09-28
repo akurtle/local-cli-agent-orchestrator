@@ -415,3 +415,53 @@ def test_readiness_is_deterministic() -> None:
 
 def test_readiness_dataclass_equality() -> None:
     assert Readiness(1, TaskStatus.READY, "x") == Readiness(1, TaskStatus.READY, "x")
+
+
+def test_blockage_propagates_down_a_chain() -> None:
+    """A -> B -> C: if A fails, both B and C must end up blocked.
+
+    Leaving C `pending` would make dead work look like it is still in flight,
+    which in turn kept objectives permanently "active".
+    """
+    nodes = graph(
+        (1, TaskStatus.FAILED),
+        (2, TaskStatus.PENDING, [1]),
+        (3, TaskStatus.PENDING, [2]),
+    )
+    first = decisions_by_id(nodes)
+    assert first[2] is TaskStatus.BLOCKED
+
+    # Apply that decision, as the scheduler would, then recompute.
+    nodes = graph(
+        (1, TaskStatus.FAILED),
+        (2, TaskStatus.BLOCKED, [1]),
+        (3, TaskStatus.PENDING, [2]),
+    )
+    assert decisions_by_id(nodes)[3] is TaskStatus.BLOCKED
+
+
+def test_blockage_reverses_when_the_chain_clears() -> None:
+    """Propagated blockage must not be permanent."""
+    nodes = graph(
+        (1, TaskStatus.COMPLETED),
+        (2, TaskStatus.BLOCKED, [1]),
+        (3, TaskStatus.BLOCKED, [2]),
+    )
+    # 2 recovers first; 3 still waits on a blocked 2 until 2 actually completes.
+    assert decisions_by_id(nodes)[2] is TaskStatus.READY
+
+    nodes = graph(
+        (1, TaskStatus.COMPLETED),
+        (2, TaskStatus.COMPLETED, [1]),
+        (3, TaskStatus.BLOCKED, [2]),
+    )
+    assert decisions_by_id(nodes)[3] is TaskStatus.READY
+
+
+def test_settled_graph_with_propagated_blockage() -> None:
+    nodes = graph(
+        (1, TaskStatus.FAILED),
+        (2, TaskStatus.BLOCKED, [1]),
+        (3, TaskStatus.BLOCKED, [2]),
+    )
+    assert is_settled(nodes)
