@@ -7,6 +7,7 @@ created. Approval is required by default.
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Annotated
 
 import typer
@@ -19,6 +20,11 @@ from agentos.cli.glyphs import glyph, safe
 from agentos.cli.task_commands import tasks_table, work_command
 from agentos.repositories.objectives import ObjectiveNotFound
 from agentos.schemas.enums import ObjectiveStatus
+from agentos.services.approvals import (
+    ApprovalRequired,
+    ApprovalService,
+    Gate,
+)
 from agentos.services.objectives import ObjectiveService, Proposal
 from agentos.services.tasks import TaskService
 
@@ -120,14 +126,28 @@ def run_objective_command(
 
     render_plan(proposal)
 
-    if not auto_approve:
+    approvals = ApprovalService(ctx.config.approvals)
+    try:
+        decision = approvals.evaluate(
+            Gate.MANAGER_PLAN,
+            approved=True if auto_approve else None,
+            interactive=sys.stdin.isatty(),
+        )
+    except ApprovalRequired as exc:
+        console.print(f"[red]{exc}[/]")
+        service.reject(proposal)
+        ctx.db.dispose()
+        raise typer.Exit(code=2) from exc
+
+    if not decision.allowed:
         console.print()
-        approved = typer.confirm("Approve this plan?", default=False)
-        if not approved:
+        if not typer.confirm("Approve this plan?", default=False):
             service.reject(proposal)
             console.print("[yellow]Plan rejected. No tasks were created.[/]")
             ctx.db.dispose()
             raise typer.Exit(code=1)
+    elif not decision.required:
+        console.print("[dim]approvals.manager_plan is off; creating tasks.[/]")
 
     created = service.approve(proposal, created_by=manager_name)
     console.print(

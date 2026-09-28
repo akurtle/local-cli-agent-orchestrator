@@ -15,7 +15,7 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 10 complete
+## Status: Phase 11 complete
 
 The manager decomposes an objective into a validated task graph; agents execute
 it concurrently in isolated git worktrees, message each other and request
@@ -33,8 +33,8 @@ follow-up work.
 | 8 | Rich dashboard | **done** |
 | 9 | Configurable agent definitions | **done** |
 | 10 | Integrator | **done** |
-| 11 | Approval gates | next |
-| 12 | Textual TUI | |
+| 11 | Approval gates | **done** |
+| 12 | Textual TUI | next |
 
 ## Install
 
@@ -46,7 +46,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 481 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 509 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -158,6 +158,20 @@ changed files and diff summary. Anything the agent claimed but git does not show
 is reported as an unverified claim. For a *shared* directory no attribution is
 possible -- concurrent agents and our own state files all appear as changes -- so
 capture is skipped entirely rather than crediting one task with another's work.
+
+### A gate that passes unwatched is not a gate
+`approvals` in config decides which actions need a human yes. The two that change
+the repository or create work (`manager_plan`, `merge`) default to on;
+`final_completion` defaults to off, because completion is computed from task state
+and a prompt there would be noise.
+
+When a gate is required and nobody can answer, the action is **refused**, not
+assumed, naming the flag that would grant it. Automation is still possible, but
+only by saying so deliberately: pass `--auto-approve` / `--yes`, or turn the gate
+off in config.
+
+`ApprovalService` only answers "is approval required here?" -- it never prompts,
+so the same rules hold for the CLI, a TUI or a non-interactive run.
 
 ### Integration detects, it does not guess
 `agentctl integrate` reports by default and merges only with `--apply`. It works

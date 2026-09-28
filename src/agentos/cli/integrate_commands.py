@@ -6,6 +6,7 @@ Dry by default: it shows the plan and changes nothing unless asked.
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Annotated
 
 import typer
@@ -14,6 +15,11 @@ from rich.table import Table
 
 from agentos.cli.context import load_context
 from agentos.cli.glyphs import glyph, safe
+from agentos.services.approvals import (
+    ApprovalRequired,
+    ApprovalService,
+    Gate,
+)
 from agentos.services.integration import IntegrationPlan, IntegrationService
 from agentos.services.tasks import TaskService
 from agentos.vcs.manager import GitError
@@ -75,6 +81,7 @@ def render_plan(plan: IntegrationPlan) -> None:
 
 def integrate_command(
     apply: bool = False,
+    yes: bool = False,
     base: str | None = None,
     agent: list[str] | None = None,
     resolver: str | None = None,
@@ -111,6 +118,27 @@ def integrate_command(
             )
         ctx.db.dispose()
         return
+
+    approvals = ApprovalService(ctx.config.approvals)
+    try:
+        decision = approvals.evaluate(
+            Gate.MERGE,
+            approved=True if yes else None,
+            interactive=sys.stdin.isatty(),
+        )
+    except ApprovalRequired as exc:
+        console.print(f"[red]{exc}[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=2) from exc
+
+    if not decision.allowed:
+        console.print()
+        summary = ", ".join(b.agent for b in plan.mergeable) or "nothing"
+        if not typer.confirm(f"Merge {summary} onto {plan.integration_branch}?",
+                             default=False):
+            console.print("[yellow]Integration cancelled. Nothing was merged.[/]")
+            ctx.db.dispose()
+            raise typer.Exit(code=1)
 
     console.print(
         f"\n[dim]Merging onto {plan.integration_branch} "

@@ -206,10 +206,15 @@ def integrate(
         bool,
         typer.Option("--no-tasks", help="Do not create resolution tasks."),
     ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip the merge approval prompt."),
+    ] = False,
 ) -> None:
     """Inspect agent branches and merge the ones that merge cleanly."""
     integrate_command(
         apply=apply,
+        yes=yes,
         base=base,
         agent=agent,
         resolver=resolver,
@@ -374,6 +379,12 @@ def doctor() -> None:
         "[green]ok[/]" if ctx.config.agents else "[yellow]none[/]",
         ", ".join(sorted(ctx.config.agents)) or "(add some to the config)",
     )
+
+    from agentos.services.approvals import ApprovalService
+
+    approvals = ApprovalService(ctx.config.approvals)
+    gates = ", ".join(g.value for g in approvals.required_gates()) or "none"
+    table.add_row("approval gates", "[green]ok[/]", gates)
 
     exit_code = 0
     try:

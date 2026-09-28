@@ -48,6 +48,23 @@ class RuntimeSection(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+class ApprovalsSection(BaseModel):
+    """Which actions need a human yes.
+
+    Defaults are deliberately asymmetric: the two gates that change the
+    repository or create work are on, and declaring an objective finished is off,
+    because that is computed from task state and adding a prompt there would just
+    be noise.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    manager_plan: bool = True
+    merge: bool = True
+    final_completion: bool = False
+    dangerous_command: bool = True
+
+
 class AgentSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -66,6 +83,7 @@ class Config(BaseModel):
     project: ProjectSection = Field(default_factory=ProjectSection)
     orchestrator: OrchestratorSection = Field(default_factory=OrchestratorSection)
     runtime: RuntimeSection = Field(default_factory=RuntimeSection)
+    approvals: ApprovalsSection = Field(default_factory=ApprovalsSection)
     agents: dict[str, AgentSection] = Field(default_factory=dict)
 
     @field_validator("runtime", mode="before")
@@ -138,6 +156,12 @@ orchestrator:
 
 # Only "claude" is implemented today. The section exists so other agent CLIs
 # (codex, gemini, ollama) can be plugged in later without config churn.
+# Which actions need a human yes before they happen.
+approvals:
+  manager_plan: true
+  merge: true
+  final_completion: false
+
 runtime:
   name: claude
   # executable: C:/path/to/claude.exe   # optional; resolved from PATH if unset
