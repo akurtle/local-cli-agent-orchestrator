@@ -15,11 +15,11 @@ decides everything else.
 - `claude` is treated as an external worker process, nothing more.
 - Nothing an agent emits is ever passed to a shell.
 
-## Status: Phase 5 complete
+## Status: Phase 6 complete
 
 The manager decomposes an objective into a validated task graph; agents execute
-it concurrently, message each other and request follow-up work. Git worktree
-isolation (phase 6) is not built yet, so agents share the project directory.
+it concurrently in isolated git worktrees, message each other and request
+follow-up work.
 
 | Phase | Scope | State |
 |---|---|---|
@@ -28,9 +28,10 @@ isolation (phase 6) is not built yet, so agents share the project directory.
 | 3 | Tasks, dependencies, scheduler | **done** |
 | 4 | Messaging, inboxes, structured responses | **done** |
 | 5 | Manager agent planning | **done** |
-| 6 | Git worktree isolation | next |
-| 7 | Rich dashboard | |
-| 8 | Textual TUI | |
+| 6 | Git worktree isolation | **done** |
+| 7 | Orchestration loop hardening | next |
+| 8 | Rich dashboard | |
+| 9-12 | Configurable agents, integrator, gates, TUI | |
 
 ## Install
 
@@ -42,7 +43,7 @@ python -m venv .venv
 ## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 350 tests, no network, no cost
+.venv\Scripts\python.exe -m pytest -q          # 405 tests, no network, no cost
 .venv\Scripts\agentctl.exe init --name "My Project"
 .venv\Scripts\agentctl.exe doctor              # detects the claude CLI
 .venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
@@ -90,6 +91,29 @@ Agents emit prose plus a delimited JSON block
 changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
 block wins so a model restating the format mid-reasoning cannot hijack the
 result. `files_changed` is a claim to verify against `git diff`, not a fact.
+
+### Agents work in isolated worktrees
+An agent with `worktree: true` gets `worktrees/<name>` on branch `agent/<name>`,
+so two coding agents never edit the same checkout. Creation is idempotent because
+it runs before every task, and removing a worktree keeps the branch by default --
+that branch holds the work, and discarding it silently would destroy the thing the
+operator still needs to review.
+
+If isolation is configured but git cannot provide it (no repository, no commits),
+the task runs in the project directory with a warning rather than stalling the
+queue. The operator asked for work to happen.
+
+### `files_changed` is a claim, checked against git
+After an isolated task, the orchestrator reads `git status` and records the real
+changed files and diff summary. Anything the agent claimed but git does not show
+is reported as an unverified claim. For a *shared* directory no attribution is
+possible -- concurrent agents and our own state files all appear as changes -- so
+capture is skipped entirely rather than crediting one task with another's work.
+
+### Nothing merges automatically
+`GitManager` can detect a conflict with `merge-tree` without touching the working
+tree, and `merge()` returns a failed result rather than raising, so a caller can
+report the conflict and create a resolution task. The scheduler never calls it.
 
 ### Claude proposes, Python applies
 `services/results.py` and `services/planner.py` are the trust boundary. An agent
@@ -215,6 +239,8 @@ src/agentos/
   services/scheduler.py  async dispatch loop over dag.py decisions
   services/runs.py   run persistence
   runtime/dry_run.py no-op runtime for free scheduling dry runs
+  vcs/manager.py     the only module that runs git; argv arrays, never a shell
+  services/workspaces.py  where each agent works; verifies claims against git
   db/migrations.py   additive column migrations
   cli/main.py        agentctl
   cli/glyphs.py      ASCII fallback for legacy Windows consoles

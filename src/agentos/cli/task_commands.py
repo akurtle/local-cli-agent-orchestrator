@@ -22,6 +22,7 @@ from agentos.schemas.dto import TaskView
 from agentos.schemas.enums import TaskStatus
 from agentos.services.dag import DependencyCycle
 from agentos.services.scheduler import Scheduler, SchedulerEvent
+from agentos.services.workspaces import WorkspaceService
 from agentos.services.tasks import (
     InvalidTaskTransition,
     TaskService,
@@ -279,6 +280,12 @@ EVENT_STYLES = {
     SchedulerEvent.FAILED: ("red", "fail  "),
     SchedulerEvent.RETRY: ("yellow", "retry "),
     SchedulerEvent.STOP: ("bright_black", "stop  "),
+    SchedulerEvent.WORKSPACE: ("blue", "tree  "),
+    SchedulerEvent.CHANGES: ("green", "files "),
+    SchedulerEvent.MESSAGE: ("magenta", "msg   "),
+    SchedulerEvent.SPAWNED: ("cyan", "spawn "),
+    SchedulerEvent.REPAIR: ("yellow", "repair"),
+    SchedulerEvent.REJECTED: ("yellow", "reject"),
 }
 
 
@@ -308,6 +315,7 @@ def work_command(
         config=ctx.config,
         agent_service=agent_service,
         task_service=task_service,
+        workspace_service=WorkspaceService(ctx.config, ctx.paths),
         on_progress=on_progress,
     )
 

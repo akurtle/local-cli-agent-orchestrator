@@ -23,6 +23,7 @@ from agentos.services.agents import AgentBusy, AgentPaused, AgentService
 from agentos.services.messages import MessageService
 from agentos.services.results import ResultProcessor, build_repair_prompt
 from agentos.services.tasks import TaskService
+from agentos.services.workspaces import WorkspaceService
 
 # Agent statuses that can accept a new task.
 AVAILABLE_AGENT_STATUSES = frozenset({AgentStatus.IDLE, AgentStatus.FAILED})
@@ -34,6 +35,8 @@ class SchedulerEvent:
     DISPATCH = "dispatch"
     COMPLETED = "completed"
     MESSAGE = "message"
+    WORKSPACE = "workspace"
+    CHANGES = "changes"
     SPAWNED = "spawned"
     REPAIR = "repair"
     REJECTED = "rejected"
@@ -53,6 +56,7 @@ class Scheduler:
         task_service: TaskService,
         message_service: MessageService | None = None,
         result_processor: ResultProcessor | None = None,
+        workspace_service: WorkspaceService | None = None,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> None:
         self.db = db
@@ -63,6 +67,7 @@ class Scheduler:
         self.results = result_processor or ResultProcessor(
             db, config, task_service, self.messages
         )
+        self.workspaces = workspace_service
         self.on_progress = on_progress
         self._stopping = False
 
@@ -129,9 +134,34 @@ class Scheduler:
         inbox = await asyncio.to_thread(self.messages.take_inbox, agent_name)
         prompt = self._build_prompt(task, inbox)
 
+        # Give the agent an isolated worktree if it is configured for one, so two
+        # coding agents never edit the same checkout at once.
+        workspace = None
+        if self.workspaces is not None:
+            agent_view = await asyncio.to_thread(self.agents.get_agent, agent_name)
+            workspace = await self.workspaces.prepare(agent_view)
+            if workspace.warning:
+                self._notify(
+                    SchedulerEvent.WORKSPACE, f"{agent_name}: {workspace.warning}"
+                )
+            elif workspace.isolated:
+                await asyncio.to_thread(
+                    self.agents.agents.set_worktree,
+                    agent_name,
+                    str(workspace.path),
+                    workspace.branch,
+                )
+                self._notify(
+                    SchedulerEvent.WORKSPACE,
+                    f"{agent_name} -> {workspace.branch}",
+                )
+
         try:
             outcome = await self.agents.run_agent(
-                agent_name, prompt, task_id=task.id
+                agent_name,
+                prompt,
+                task_id=task.id,
+                cwd=str(workspace.path) if workspace else None,
             )
         except (AgentBusy, AgentPaused) as exc:
             # Lost a race for the agent: return the task to the queue untouched.
@@ -168,7 +198,35 @@ class Scheduler:
         # The run completed and its response was understood: the messages that
         # went into this prompt are genuinely consumed.
         await asyncio.to_thread(self.messages.confirm_read, inbox)
-        return task, True, None, result.summary or outcome.text
+
+        summary = result.summary or outcome.text
+        # Only report changes for an isolated worktree. In a shared project
+        # directory, concurrent agents and the orchestrator's own state files all
+        # show up as changes, so attributing any of them to this task would be
+        # wrong rather than merely noisy.
+        if (
+            workspace is not None
+            and workspace.isolated
+            and self.workspaces is not None
+        ):
+            report = await self.workspaces.capture(
+                workspace, claimed_files=result.files_changed
+            )
+            if not report.is_empty:
+                self._notify(
+                    SchedulerEvent.CHANGES,
+                    f"{task.key}: {len(report.files_changed)} file(s) "
+                    f"{report.diff_summary}",
+                )
+            if report.unverified_claims:
+                self._notify(
+                    SchedulerEvent.REJECTED,
+                    f"{task.key}: claimed but unchanged: "
+                    + ", ".join(report.unverified_claims[:5]),
+                )
+            summary = summary + "\n\n" + report.render()
+
+        return task, True, None, summary
 
     async def _apply_result(self, task: TaskView, agent_name: str, text: str):
         """Validate the agent response and apply what it legitimately asks for.

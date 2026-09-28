@@ -18,9 +18,10 @@ from rich.panel import Panel
 from rich.table import Table
 
 from agentos import __version__
-from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME
+from agentos.branding import APP_NAME, CLI_NAME, CONFIG_FILENAME, STATE_DIRNAME
 from agentos.cli.agent_commands import agent_app, list_agents_command
 from agentos.cli.context import load_context
+from agentos.cli.git_commands import diff_command, git_app
 from agentos.cli.run_commands import (
     list_objectives_command,
     run_objective_command,
@@ -53,6 +54,7 @@ console = Console()
 
 app.add_typer(agent_app)
 app.add_typer(task_app)
+app.add_typer(git_app)
 
 
 @app.command("agents")
@@ -110,6 +112,20 @@ def objective(
 ) -> None:
     """Show one objective and its tasks."""
     show_objective_command(objective_id)
+
+
+@app.command("diff")
+def diff(
+    agent: Annotated[str, typer.Argument(help="Agent whose changes to show.")],
+    name_only: Annotated[
+        bool, typer.Option("--name-only", help="List paths instead of the diff.")
+    ] = False,
+    stat: Annotated[
+        bool, typer.Option("--stat", help="Summarise per file.")
+    ] = False,
+) -> None:
+    """Show what an agent changed in its worktree."""
+    diff_command(agent, name_only=name_only, stat=stat)
 
 
 @app.command("messages")
@@ -210,7 +226,43 @@ def init(
     db.create_all()
     db.dispose()
     console.print(f"[green]Initialised database[/] {paths.db_file}")
+
+    if _ignore_our_artifacts(root):
+        console.print("[green]Updated[/] .gitignore")
+
     console.print(f"\nNext: [bold]{CLI_NAME} doctor[/]")
+
+
+def _ignore_our_artifacts(root: Path) -> bool:
+    """Add our state and worktree directories to .gitignore.
+
+    Without this they show up as untracked forever, which buries the changes an
+    operator actually wants to review. Only touches a file inside a git repo, and
+    never rewrites entries that are already present.
+    """
+    if not (root / ".git").exists():
+        return False
+
+    gitignore = root / ".gitignore"
+    wanted = [f"/{STATE_DIRNAME}/", "/worktrees/"]
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+    except OSError:
+        return False
+
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [entry for entry in wanted if entry not in present]
+    if not missing:
+        return False
+
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    block = prefix + "\n# agentos\n" + "\n".join(missing) + "\n"
+    try:
+        with gitignore.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+    except OSError:
+        return False
+    return True
 
 
 # ------------------------------------------------------------------- doctor
