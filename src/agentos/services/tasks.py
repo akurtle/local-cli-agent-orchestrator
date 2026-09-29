@@ -258,9 +258,13 @@ class TaskService:
         return cancelled
 
     def retry(self, key_or_id: str | int) -> TaskView:
-        """Put a failed task back in the queue."""
+        """Put a failed task back in the queue.
+
+        A task whose claim failed verification counts: after the fix lands, a
+        retry is the only way back, and it still has to pass the checks again.
+        """
         task = self.tasks.get(key_or_id)
-        if task.status is not TaskStatus.FAILED:
+        if task.status not in {TaskStatus.FAILED, TaskStatus.FAILED_VERIFICATION}:
             raise InvalidTaskTransition(
                 f"{task.key} is {task.status.value}, only failed tasks can be retried"
             )

@@ -5,12 +5,17 @@ Layout, per the spec:
     +---- AGENTS ----+  +---- TASKS ----+
     |                |  |               |
     +----------------+  +---------------+
+    +------------ NEEDS YOU ------------+   (only while something does)
     +--- CHANGES ----+  +-- MESSAGES ---+
     +----------- AGENT OUTPUT ----------+
 
-Widgets only display a `Snapshot` and translate keystrokes into selections. All
+Widgets display a `Snapshot` and translate keystrokes into selections. All
 state lives in the services; this module contains no orchestration logic and
 cannot run an agent -- the reader is wired to a runtime that refuses.
+
+The one exception to read-only is task status: `u` unblocks and `R` retries the
+selected task, after a confirmation, exactly as `agentctl task unblock|retry`
+would. The task then waits for `agentctl work`; nothing runs from here.
 """
 
 from __future__ import annotations
@@ -20,10 +25,20 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Static
 from textual.worker import get_current_worker
 
+from agentos.repositories.tasks import TaskNotFound
 from agentos.schemas.enums import AgentStatus, TaskStatus
+from agentos.services.tasks import InvalidTaskTransition
+from agentos.tui.attention import (
+    KIND_STYLE,
+    Kind,
+    AttentionItem,
+    merge_items,
+    sort_items,
+)
 from agentos.tui.changes import (
     AgentChanges,
     ChangesReader,
@@ -85,10 +100,39 @@ def summary_line(snapshot: Snapshot) -> str:
         parts.append(f"[red]{len(snapshot.failed)} failed[/]")
     if snapshot.blocked:
         parts.append(f"[yellow]{len(snapshot.blocked)} blocked[/]")
+    if snapshot.attention:
+        parts.append(f"[bold yellow]{len(snapshot.attention)} need you[/]")
     return "   ".join(parts)
 
 
-class AgentsPanel(DataTable):
+class KeptCursorTable(DataTable):
+    """A table rebuilt on every refresh that keeps its cursor on the same row.
+
+    `clear()` sends the cursor back to the first row, so without this the
+    cursor, and with it the selection, jumped to the top every refresh.
+    """
+
+    _kept: str | None = None
+
+    def clear(self, columns: bool = False):
+        self._kept = None
+        if self.row_count:
+            try:
+                cell = self.coordinate_to_cell_key(self.cursor_coordinate)
+                self._kept = cell.row_key.value
+            except Exception:  # cursor outside the rows
+                pass
+        return super().clear(columns)
+
+    def add_row(self, *cells, key: str | None = None, **kwargs):
+        row_key = super().add_row(*cells, key=key, **kwargs)
+        if key is not None and key == self._kept:
+            self._kept = None
+            self.move_cursor(row=self.row_count - 1, animate=False)
+        return row_key
+
+
+class AgentsPanel(KeptCursorTable):
     """Agent roster. Selecting a row filters the output pane."""
 
     def on_mount(self) -> None:
@@ -114,7 +158,7 @@ class AgentsPanel(DataTable):
             )
 
 
-class TasksPanel(DataTable):
+class TasksPanel(KeptCursorTable):
     """Task list. Selecting a row shows its detail in the output pane."""
 
     def on_mount(self) -> None:
@@ -141,7 +185,7 @@ def lines_label(added: int, removed: int) -> str:
     return f"[green]+{added}[/] [red]-{removed}[/]"
 
 
-class ChangesPanel(DataTable):
+class ChangesPanel(KeptCursorTable):
     """Per-agent change totals. Selecting a row shows the breakdown."""
 
     def on_mount(self) -> None:
@@ -171,6 +215,31 @@ class ChangesPanel(DataTable):
                 str(len(entry.files)),
                 where,
                 key=entry.agent,
+            )
+
+
+class AttentionPanel(KeptCursorTable):
+    """Everything waiting on a human. Hidden while nothing is."""
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.add_columns("Needs", "Item", "Agent", "Why")
+
+    def show(self, items: list[AttentionItem]) -> None:
+        self.clear()
+        self.display = bool(items)
+        self.border_title = f"needs you ({len(items)})"
+        for item in items:
+            style = KIND_STYLE[item.kind]
+            why = " ".join(item.reason.split())
+            if item.holding_up:
+                why = f"[dim]holds {len(item.holding_up)}[/] {why}"
+            self.add_row(
+                f"[{style}]{item.label}[/]",
+                item.title[:60],
+                item.agent or "-",
+                why[:90],
+                key=item.key,
             )
 
 
@@ -284,6 +353,38 @@ class OutputPanel(Static):
         lines += ["", f"[dim]full diff: {hint}[/]"]
         self.update("\n".join(lines))
 
+    def show_attention(self, items: list[AttentionItem], key: str) -> None:
+        item = next((i for i in items if i.key == key), None)
+        if item is None:
+            self.update("[dim]Resolved.[/]")
+            return
+        style = KIND_STYLE[item.kind]
+        lines = [f"[{style}]{item.label}[/]  [bold]{item.title}[/]"]
+        if item.agent:
+            lines.append(f"agent: {item.agent}")
+        lines += ["", "[bold]why[/]", item.reason]
+        if item.denials:
+            lines += ["", "[bold]declined in the agent's session[/]"]
+            lines += [f"  [red]x[/] {d.spelled}" for d in item.denials[:12]]
+            if len(item.denials) > 12:
+                lines.append(f"  [dim]...and {len(item.denials) - 12} more[/]")
+        if item.holding_up:
+            lines += [
+                "",
+                "[bold]holding up[/]  " + ", ".join(item.holding_up)
+                + "  [dim](these resume once this is resolved)[/]",
+            ]
+        if item.notes:
+            lines.append("")
+            lines += [f"[dim]{note}[/]" for note in item.notes]
+        lines += ["", "[bold]to resolve[/]"]
+        lines += [f"  [cyan]{action}[/]" for action in item.actions]
+        if item.key.startswith("task:"):
+            key = "R" if item.kind in {Kind.FAILED, Kind.VERIFY} else "u"
+            verb = "retry" if key == "R" else "unblock"
+            lines.append(f"  [dim]or press[/] [bold]{key}[/] [dim]here to {verb} it[/]")
+        self.update("\n".join(lines))
+
     def show_task(self, snapshot: Snapshot, key: str) -> None:
         task = snapshot.task(key)
         if task is None:
@@ -309,12 +410,41 @@ class OutputPanel(Static):
         self.update("\n".join(lines))
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    """A yes/no question. Dismisses with True only on an explicit yes."""
+
+    DEFAULT_CSS = """
+    ConfirmScreen { align: center middle; }
+    ConfirmScreen > Static {
+        width: 72; height: auto; padding: 1 2;
+        border: thick $warning; background: $surface;
+    }
+    """
+
+    BINDINGS = [
+        Binding("y", "answer(True)", "Yes"),
+        Binding("n", "answer(False)", "No"),
+        Binding("escape", "answer(False)", "Cancel"),
+    ]
+
+    def __init__(self, question: str) -> None:
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"{self.question}\n\n[bold]y[/] yes    [bold]n[/] no")
+
+    def action_answer(self, answer: bool) -> None:
+        self.dismiss(answer)
+
+
 class DashboardApp(App):
     """Read-only dashboard over a project."""
 
     CSS = """
     Screen { layout: vertical; }
     #top { height: 35%; }
+    #attention { height: auto; max-height: 10; border: round yellow; }
     #middle { height: 25%; }
     #agents, #tasks { width: 1fr; border: round $accent; }
     #changes { width: 1fr; border: round green; }
@@ -329,6 +459,9 @@ class DashboardApp(App):
         Binding("a", "focus_agents", "Agents"),
         Binding("t", "focus_tasks", "Tasks"),
         Binding("c", "focus_changes", "Changes"),
+        Binding("n", "focus_attention", "Needs you"),
+        Binding("u", "unblock", "Unblock"),
+        Binding("R", "retry", "Retry"),
     ]
 
     snapshot: reactive[Snapshot | None] = reactive(None)
@@ -343,6 +476,7 @@ class DashboardApp(App):
         self._selected_agent: str | None = None
         self._selected_task: str | None = None
         self._selected_changes: str | None = None
+        self._selected_attention: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -350,6 +484,7 @@ class DashboardApp(App):
         with Horizontal(id="top"):
             yield AgentsPanel(id="agents")
             yield TasksPanel(id="tasks")
+        yield AttentionPanel(id="attention")
         with Horizontal(id="middle"):
             yield ChangesPanel(id="changes")
             yield MessagesPanel("", id="messages")
@@ -403,7 +538,9 @@ class DashboardApp(App):
         if self.snapshot is None:
             return
         panel.show(self.snapshot, changes)
-        if self._selected_changes:
+        # Merge readiness comes from the scan, so it refreshes on the scan too.
+        self._show_attention()
+        if self._selected_changes or self._selected_attention:
             self._refresh_output(self.snapshot)
 
     def _changes_failed(self, exc: Exception) -> None:
@@ -421,7 +558,18 @@ class DashboardApp(App):
         self.query_one("#tasks", TasksPanel).show(snapshot)
         self.query_one("#messages", MessagesPanel).show(snapshot)
         self.query_one("#changes", ChangesPanel).show(snapshot, self.changes)
+        self._show_attention()
         self._refresh_output(snapshot)
+
+    @property
+    def attention(self) -> list[AttentionItem]:
+        """Database items plus branches the latest scan found ready to merge."""
+        if self.snapshot is None:
+            return []
+        return sort_items(self.snapshot.attention + merge_items(self.changes))
+
+    def _show_attention(self) -> None:
+        self.query_one("#attention", AttentionPanel).show(self.attention)
 
     def select_agent(self, name: str) -> None:
         """Show an agent in the output pane.
@@ -431,14 +579,14 @@ class DashboardApp(App):
         output pane has to prefer one.
         """
         self._selected_agent, self._selected_task = name, None
-        self._selected_changes = None
+        self._selected_changes = self._selected_attention = None
         if self.snapshot is not None:
             self._refresh_output(self.snapshot)
 
     def select_task(self, key: str) -> None:
         """Show a task in the output pane, clearing any selected agent."""
         self._selected_task, self._selected_agent = key, None
-        self._selected_changes = None
+        self._selected_changes = self._selected_attention = None
         if self.snapshot is not None:
             self._refresh_output(self.snapshot)
 
@@ -446,6 +594,14 @@ class DashboardApp(App):
         """Show an agent's change breakdown, clearing other selections."""
         self._selected_changes = agent
         self._selected_agent = self._selected_task = None
+        self._selected_attention = None
+        if self.snapshot is not None:
+            self._refresh_output(self.snapshot)
+
+    def select_attention(self, key: str) -> None:
+        """Show what an item needs and how to resolve it."""
+        self._selected_attention = key
+        self._selected_agent = self._selected_task = self._selected_changes = None
         if self.snapshot is not None:
             self._refresh_output(self.snapshot)
 
@@ -454,7 +610,9 @@ class DashboardApp(App):
             output = self.query_one("#output", OutputPanel)
         except NoMatches:  # a late highlight event while the app shuts down
             return
-        if self._selected_changes:
+        if self._selected_attention:
+            output.show_attention(self.attention, self._selected_attention)
+        elif self._selected_changes:
             output.show_changes(snapshot, self.changes, self._selected_changes)
         elif self._selected_task:
             output.show_task(snapshot, self._selected_task)
@@ -462,13 +620,33 @@ class DashboardApp(App):
             output.show_agent(snapshot, self._selected_agent)
 
     def on_data_table_row_highlighted(self, event) -> None:
+        # Every refresh rebuilds the tables, which fires highlights of its own;
+        # only the table the user is in may move the selection.
+        if not event.data_table.has_focus:
+            return
         key = event.row_key.value if event.row_key else None
+        self._select_from(event.data_table, key)
+
+    def on_descendant_focus(self, event) -> None:
+        """Entering a table selects its current row, so the pane follows."""
+        table = event.widget
+        if not isinstance(table, DataTable) or not table.row_count:
+            return
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        except Exception:  # cursor outside the rows during a rebuild
+            return
+        self._select_from(table, key)
+
+    def _select_from(self, table: DataTable, key: str | None) -> None:
         if key is None or self.snapshot is None:
             return
-        if isinstance(event.data_table, AgentsPanel):
+        if isinstance(table, AgentsPanel):
             self.select_agent(key)
-        elif isinstance(event.data_table, ChangesPanel):
+        elif isinstance(table, ChangesPanel):
             self.select_changes(key)
+        elif isinstance(table, AttentionPanel):
+            self.select_attention(key)
         else:
             self.select_task(key)
 
@@ -483,3 +661,63 @@ class DashboardApp(App):
 
     def action_focus_changes(self) -> None:
         self.query_one("#changes", ChangesPanel).focus()
+
+    def action_focus_attention(self) -> None:
+        panel = self.query_one("#attention", AttentionPanel)
+        if panel.display:
+            panel.focus()
+
+    # ------------------------------------------------------------ task actions
+
+    def selected_task_key(self) -> str | None:
+        """The task the selection points at, from the tasks or needs-you panel."""
+        if self._selected_task:
+            return self._selected_task
+        if self._selected_attention and self._selected_attention.startswith("task:"):
+            return self._selected_attention.split(":", 1)[1]
+        return None
+
+    def action_unblock(self) -> None:
+        self._confirm_task_action(
+            "unblock",
+            "Clears the blocker and queues it again. Fix what blocked it first, "
+            "or the agent will hit the same wall.",
+            self.reader.unblock,
+        )
+
+    def action_retry(self) -> None:
+        self._confirm_task_action(
+            "retry",
+            "Puts it back in the queue with a fresh attempt.",
+            self.reader.retry,
+        )
+
+    def _confirm_task_action(self, verb: str, warning: str, apply) -> None:
+        key = self.selected_task_key()
+        if key is None:
+            self.notify(
+                f"Select a task to {verb} (tasks panel or needs you).",
+                severity="warning",
+            )
+            return
+
+        def decided(answer: bool | None) -> None:
+            if answer:
+                self._apply_task_action(verb, key, apply)
+
+        self.push_screen(
+            ConfirmScreen(f"[bold]{verb.capitalize()} {key}?[/]\n\n{warning}"),
+            decided,
+        )
+
+    def _apply_task_action(self, verb: str, key: str, apply) -> None:
+        try:
+            task = apply(key)
+        except (InvalidTaskTransition, TaskNotFound) as exc:
+            self.notify(f"Could not {verb} {key}: {exc}", severity="error")
+            return
+        self.notify(
+            f"{key} -> {task.status.value}. Run `agentctl work` to start it.",
+            title={"unblock": "Unblocked", "retry": "Retried"}[verb],
+        )
+        self.refresh_snapshot()

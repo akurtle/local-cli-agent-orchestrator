@@ -498,7 +498,7 @@ async def test_retry_after_failed_verification_can_succeed(db, tmp_path) -> None
 
     # The fix lands, and the operator requeues the task.
     marker.write_text("fixed", encoding="utf-8")
-    tasks.tasks.set_status(task.key, TaskStatus.READY, error="")
+    tasks.retry(task.key)
 
     await scheduler.run()
     assert tasks.get_task(task.key).status is TaskStatus.COMPLETED
