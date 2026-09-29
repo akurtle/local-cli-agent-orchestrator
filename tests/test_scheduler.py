@@ -1213,4 +1213,4 @@ async def test_backend_is_not_denied_the_edit_tools(db, config, tmp_path) -> Non
     scheduler, tasks, _ = build(db, config, runtime, tmp_path)
     tasks.create_task("build it", agent="backend")
     await scheduler.run()
-    assert runtime.requests[0].disallowed_tools == []
+    assert not {"Edit", "Write", "NotebookEdit"} & set(runtime.requests[0].disallowed_tools)

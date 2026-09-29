@@ -72,6 +72,39 @@ class AgentPaused(RuntimeError):
     """The agent is paused and will not accept work."""
 
 
+def shell_allowed_tools(
+    config: Config, capabilities: frozenset[Capability]
+) -> list[str]:
+    """Pre-approve the configured development commands for the agent's shell.
+
+    Print mode cannot ask a human, so a shell command that is not pre-approved is
+    simply declined. The `commands.allowed` policy is translated into CLI rules
+    here so an agent allowed to run commands can run the ones the operator
+    sanctioned, and nothing else.
+    """
+    if Capability.RUN_COMMAND not in capabilities:
+        return []
+    denied = {name.lower() for name in config.commands.denied}
+    return [
+        f"Bash({program}:*)"
+        for program in config.commands.allowed
+        if program.lower() not in denied
+    ]
+
+
+def shell_denied_tools(
+    config: Config, capabilities: frozenset[Capability]
+) -> list[str]:
+    """Commands that need a human stay out of reach of a headless run.
+
+    `git push` would otherwise ride on the `git` allowance; a deny rule beats an
+    allow rule in the CLI, so these are refused rather than silently approved.
+    """
+    if Capability.RUN_COMMAND not in capabilities:
+        return []
+    return [f"Bash({pattern}:*)" for pattern in config.commands.require_approval]
+
+
 class AgentService:
     def __init__(
         self,
@@ -441,7 +474,9 @@ class AgentService:
             cwd=working_dir,
             model=agent.model,
             timeout_seconds=timeout,
-            disallowed_tools=grants.denied_tools,
+            allowed_tools=shell_allowed_tools(self.config, grants.capabilities),
+            disallowed_tools=grants.denied_tools
+            + shell_denied_tools(self.config, grants.capabilities),
             # Headless runs cannot prompt, so edits are accepted up front for an
             # agent allowed to edit; one without edit_files is still denied the
             # tools outright above.

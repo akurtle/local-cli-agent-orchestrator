@@ -187,7 +187,7 @@ async def test_reviewer_run_denies_edit_tools(db, config, tmp_path) -> None:
     assert "Edit" in runtime.requests[0].disallowed_tools
 
     await service.run_agent("backend", "build it")
-    assert runtime.requests[1].disallowed_tools == []
+    assert not {"Edit", "Write", "Bash"} & set(runtime.requests[1].disallowed_tools)
 
 
 # ---------------------------------------------------------------- grants logic
@@ -383,3 +383,38 @@ async def test_only_editors_get_accept_edits(db, config, tmp_path) -> None:
 
     await service.run_agent("reviewer", "review it")
     assert runtime.requests[1].permission_mode is None
+
+
+async def test_command_policy_reaches_the_shell(db, config, tmp_path) -> None:
+    """Print mode cannot prompt, so sanctioned commands are pre-approved."""
+    runtime = StubRuntime()
+    service = AgentService(db, config, runtime, tmp_path)
+    service.sync_from_config()
+    await service.run_agent("backend", "build it")
+    request = runtime.requests[0]
+    assert "Bash(npm:*)" in request.allowed_tools
+    assert "Bash(pytest:*)" in request.allowed_tools
+    # Needs a human, so it must not ride on the `git` allowance.
+    assert "Bash(git push:*)" in request.disallowed_tools
+
+
+def test_no_shell_rules_without_run_command(config) -> None:
+    from agentos.services.agents import shell_allowed_tools, shell_denied_tools
+
+    read_only = frozenset({Capability.READ_FILES})
+    assert shell_allowed_tools(config, read_only) == []
+    assert shell_denied_tools(config, read_only) == []
+
+
+def test_denied_program_is_never_pre_approved() -> None:
+    from agentos.services.agents import shell_allowed_tools
+
+    config = Config.model_validate(
+        {
+            "project": {"name": "x"},
+            "agents": {"backend": {"role": "backend"}},
+            "commands": {"allowed": ["npm", "bash"], "denied": ["bash"]},
+        }
+    )
+    tools = shell_allowed_tools(config, frozenset({Capability.RUN_COMMAND}))
+    assert tools == ["Bash(npm:*)"]
