@@ -195,6 +195,10 @@ class ClaudeRunner:
         if request.disallowed_tools:
             argv += ["--disallowedTools", *request.disallowed_tools]
 
+        # An explicit --permission-mode in extra_args is the user's override.
+        if request.permission_mode and "--permission-mode" not in self.extra_args:
+            argv += ["--permission-mode", request.permission_mode]
+
         argv += self.extra_args
         return argv, session_id
 

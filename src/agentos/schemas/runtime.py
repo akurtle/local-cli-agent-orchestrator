@@ -34,6 +34,9 @@ class RunRequest(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     disallowed_tools: list[str] = Field(default_factory=list)
     """Tools the agent must not be able to use, from its capabilities."""
+    permission_mode: str | None = None
+    """Passed as `--permission-mode`. Print mode cannot ask a human, so an agent
+    that may edit needs `acceptEdits` or every Edit/Write is declined."""
     stream: bool = True
 
 

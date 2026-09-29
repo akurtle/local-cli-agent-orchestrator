@@ -16,6 +16,7 @@ from agentos.db.session import Database
 from agentos.prompts.loader import build_system_prompt
 from agentos.repositories.agents import AgentNotFound, AgentRepository
 from agentos.runtime.base import AgentRuntime
+from agentos.schemas.capabilities import Capability
 from agentos.schemas.dto import AgentRunOutcome, AgentView
 from agentos.schemas.enums import AgentStatus, MemoryCategory, MemoryScope
 from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
@@ -431,6 +432,7 @@ class AgentService:
         timeout: float,
         on_event: Callable[[StreamEvent], None] | None,
     ) -> RunResult:
+        grants = self.permissions.grants_for(agent)
         request = RunRequest(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -439,7 +441,13 @@ class AgentService:
             cwd=working_dir,
             model=agent.model,
             timeout_seconds=timeout,
-            disallowed_tools=self.permissions.grants_for(agent).denied_tools,
+            disallowed_tools=grants.denied_tools,
+            # Headless runs cannot prompt, so edits are accepted up front for an
+            # agent allowed to edit; one without edit_files is still denied the
+            # tools outright above.
+            permission_mode=(
+                "acceptEdits" if grants.has(Capability.EDIT_FILES) else None
+            ),
             stream=True,
         )
         return await self.runtime.run(request, on_event=on_event)

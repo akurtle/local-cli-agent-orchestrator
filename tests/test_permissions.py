@@ -337,3 +337,49 @@ def test_describe_is_stably_ordered() -> None:
     second_may, second_not = describe(defaults_for_role("reviewer"))
     assert first_may == second_may
     assert first_not == second_not
+
+
+def test_permission_mode_reaches_the_command_line() -> None:
+    from agentos.runtime.claude_cli import ClaudeRunner
+
+    class FakeRunner(ClaudeRunner):
+        @property
+        def executable(self) -> str:
+            return "claude"
+
+    argv, _ = FakeRunner().build_command(
+        RunRequest(prompt="x", permission_mode="acceptEdits")
+    )
+    index = argv.index("--permission-mode")
+    assert argv[index + 1] == "acceptEdits"
+
+    argv, _ = FakeRunner().build_command(RunRequest(prompt="x"))
+    assert "--permission-mode" not in argv
+
+
+def test_configured_permission_mode_wins() -> None:
+    from agentos.runtime.claude_cli import ClaudeRunner
+
+    class FakeRunner(ClaudeRunner):
+        @property
+        def executable(self) -> str:
+            return "claude"
+
+    runner = FakeRunner(extra_args=["--permission-mode", "plan"])
+    argv, _ = runner.build_command(
+        RunRequest(prompt="x", permission_mode="acceptEdits")
+    )
+    assert argv.count("--permission-mode") == 1
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+async def test_only_editors_get_accept_edits(db, config, tmp_path) -> None:
+    """Print mode cannot prompt, so an editor must be pre-approved to edit."""
+    runtime = StubRuntime()
+    service = AgentService(db, config, runtime, tmp_path)
+    service.sync_from_config()
+    await service.run_agent("backend", "build it")
+    assert runtime.requests[0].permission_mode == "acceptEdits"
+
+    await service.run_agent("reviewer", "review it")
+    assert runtime.requests[1].permission_mode is None
