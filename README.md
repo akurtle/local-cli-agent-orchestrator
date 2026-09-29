@@ -76,7 +76,29 @@ agentctl watch                              new events as they occur
 agentctl stats                               run metrics
 agentctl replan [--reason|--task]            have the manager repair the graph
 agentctl pause|resume <agent>               take an agent out of rotation
+agentctl provider [claude|codex] [--reset]  model provider and tier models
 ```
+
+## Providers and model tiers
+
+Agents run on Claude Code (`claude`) or OpenAI Codex (`codex exec`), using each
+CLI's existing login. The manager plans on the provider's strongest model; every
+other agent works on a faster one:
+
+| provider | planning (manager) | execution (others) |
+|---|---|---|
+| claude | claude-opus-5-5 | claude-sonnet-5 |
+| codex | gpt-6-astra | gpt-6-luna |
+
+Switch per project with `p` in the dashboard or `agentctl provider codex`; the
+choice is stored in `.agentos/provider` and applies to the next `work`. Override
+models under `providers.<name>.planning|execution`, move an agent between tiers
+with `tier:`, or pin one with `model:`.
+
+Codex has no per-tool allowlist, so capabilities map onto its sandbox instead:
+agents that may edit get `workspace-write` (no network), the rest `read-only`,
+with approval prompts off. `commands.allowed` is enforced up front only on
+Claude; the git and verification checks after a run apply to both.
 
 ## Verify Phase 1
 

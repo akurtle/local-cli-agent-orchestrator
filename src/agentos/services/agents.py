@@ -14,6 +14,7 @@ from pathlib import Path
 from agentos.config import Config
 from agentos.db.session import Database
 from agentos.prompts.loader import build_system_prompt
+from agentos.providers import resolve_model
 from agentos.repositories.agents import AgentNotFound, AgentRepository
 from agentos.runtime.base import AgentRuntime
 from agentos.schemas.capabilities import Capability
@@ -153,7 +154,7 @@ class AgentService:
                 role=section.role,
                 description=section.description,
                 runtime=self.config.runtime.name,
-                model=section.model or self.config.runtime.model,
+                model=resolve_model(self.config, name),
             )
             if was_created:
                 created.append(name)
@@ -393,6 +394,12 @@ class AgentService:
             self.transition, name, AgentStatus.WORKING, task_id
         )
 
+        # A session belongs to the provider that created it. After a switch the
+        # other CLI cannot resume it, so start fresh rather than fail first.
+        switched_from = await asyncio.to_thread(self._foreign_session, agent)
+        if switched_from:
+            agent = await asyncio.to_thread(self.agents.set_session_id, name, None)
+
         resumed = bool(agent.session_id)
         session_restarted = False
         try:
@@ -466,6 +473,25 @@ class AgentService:
             duration_seconds=result.duration_seconds,
         )
 
+    def _foreign_session(self, agent: AgentView) -> str | None:
+        """The provider that owns this agent's session, if it is not ours."""
+        if not agent.session_id:
+            return None
+        from sqlalchemy import select
+
+        from agentos.db.models import Run
+
+        with self.db.session() as session:
+            owner = session.scalar(
+                select(Run.runtime)
+                .where(Run.session_id == agent.session_id)
+                .order_by(Run.id.desc())
+                .limit(1)
+            )
+        if owner and owner != self.runtime.name:
+            return owner
+        return None
+
     async def _invoke(
         self,
         agent: AgentView,
@@ -482,7 +508,11 @@ class AgentService:
             session_id=agent.session_id,
             resume=bool(agent.session_id),
             cwd=working_dir,
-            model=agent.model,
+            # From this process's config, not the database: a provider switched
+            # in the dashboard must not hand this runtime the other one's model.
+            model=resolve_model(self.config, agent.name)
+            if agent.name in self.config.agents
+            else agent.model,
             timeout_seconds=timeout,
             allowed_tools=shell_allowed_tools(self.config, grants.capabilities),
             disallowed_tools=grants.denied_tools

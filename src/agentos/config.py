@@ -7,7 +7,7 @@ rather than halfway through an orchestration run.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -53,10 +53,10 @@ class OrchestratorSection(BaseModel):
 
 
 class RuntimeSection(BaseModel):
-    """Which external agent CLI backs the agents.
+    """Which external agent CLI backs the agents: "claude" or "codex".
 
-    Only "claude" is implemented; the field exists so other runtimes can be
-    added without reshaping the config.
+    `model` is the older single-model setting. Prefer `providers.<name>` with a
+    planning and an execution model; see agentos/providers.py.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -65,6 +65,21 @@ class RuntimeSection(BaseModel):
     executable: str | None = None
     """Explicit path to the CLI. When None we resolve it from PATH."""
     model: str | None = None
+    extra_args: list[str] = Field(default_factory=list)
+
+
+class ProviderSection(BaseModel):
+    """Models and CLI details for one provider.
+
+    `planning` is the manager's model; `execution` is every other agent's. An
+    agent can pick a tier with `tier:` or a model outright with `model:`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    planning: str | None = None
+    execution: str | None = None
+    executable: str | None = None
     extra_args: list[str] = Field(default_factory=list)
 
 
@@ -211,6 +226,9 @@ class AgentSection(BaseModel):
     """What this agent may do. None means "use the defaults for its role"."""
     worktree: bool = False
     """Whether this agent gets an isolated git worktree (phase 6)."""
+    tier: Literal["planning", "execution"] | None = None
+    """Which of the provider's models to use. None: planning for the manager,
+    execution for everyone else."""
 
 
 class Config(BaseModel):
@@ -219,6 +237,7 @@ class Config(BaseModel):
     project: ProjectSection = Field(default_factory=ProjectSection)
     orchestrator: OrchestratorSection = Field(default_factory=OrchestratorSection)
     runtime: RuntimeSection = Field(default_factory=RuntimeSection)
+    providers: dict[str, ProviderSection] = Field(default_factory=dict)
     approvals: ApprovalsSection = Field(default_factory=ApprovalsSection)
     context: ContextSection = Field(default_factory=ContextSection)
     commands: CommandsSection = Field(default_factory=CommandsSection)
@@ -293,8 +312,17 @@ orchestrator:
   default_timeout_seconds: 900
   max_task_retries: 1
 
-# Only "claude" is implemented today. The section exists so other agent CLIs
-# (codex, gemini, ollama) can be plugged in later without config churn.
+# Which models agents use. The manager plans with the provider's strongest
+# model; everyone else works on a faster one. Switch provider from the
+# dashboard (p) or with `agentctl provider codex`. Uncomment to choose models:
+#
+# providers:
+#   claude:
+#     planning: claude-opus-5-5
+#     execution: claude-sonnet-5
+#   codex:
+#     planning: gpt-6-astra
+#     execution: gpt-6-luna
 # What each agent is allowed to do. Omit an agent's list to use the defaults for
 # its role; see schemas/capabilities.py. Enforced in code, not just in prompts.
 #

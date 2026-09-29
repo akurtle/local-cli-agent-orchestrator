@@ -233,6 +233,21 @@ def watch(
     watch_command(interval=interval)
 
 
+@app.command("provider")
+def provider(
+    name: Annotated[
+        str | None, typer.Argument(help="claude or codex. Omit to just show.")
+    ] = None,
+    reset: Annotated[
+        bool, typer.Option("--reset", help="Go back to runtime.name in agentos.yaml.")
+    ] = False,
+) -> None:
+    """Show or switch the model provider, and each tier's model."""
+    from agentos.cli.provider_commands import provider_command
+
+    provider_command(name, reset)
+
+
 @app.command("stats")
 def stats() -> None:
     """Show run metrics derived from stored rows."""

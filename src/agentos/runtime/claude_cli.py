@@ -99,9 +99,17 @@ class _NullTimeout:
 
 
 class ClaudeRunner:
-    """Launches and supervises `claude -p` processes."""
+    """Launches and supervises `claude -p` processes.
+
+    Also the base for other CLIs: spawning, streaming, timeouts and killing the
+    process tree are the same for any of them, so a subclass overrides only the
+    hooks that differ -- how the command is built, what goes on stdin, and how
+    events are read.
+    """
 
     name = "claude"
+    auth_note = "inherited from Claude Code login (no API key used)"
+    stale_markers: tuple[str, ...] = STALE_SESSION_MARKERS
 
     def __init__(
         self,
@@ -121,8 +129,12 @@ class ClaudeRunner:
     @property
     def executable(self) -> str:
         if self._resolved is None:
-            self._resolved = resolve_executable(self._explicit_executable)
+            self._resolved = self._resolve_executable(self._explicit_executable)
         return self._resolved
+
+    @staticmethod
+    def _resolve_executable(explicit: str | None) -> str:
+        return resolve_executable(explicit)
 
     def preflight(self) -> dict[str, str]:
         """Confirm the CLI exists and responds. Raises RuntimeNotAvailable."""
@@ -152,7 +164,7 @@ class ClaudeRunner:
             "runtime": self.name,
             "executable": exe,
             "version": (proc.stdout or "").strip(),
-            "auth": "inherited from Claude Code login (no API key used)",
+            "auth": self.auth_note,
         }
 
     # ------------------------------------------------------------ command build
@@ -202,6 +214,10 @@ class ClaudeRunner:
         argv += self.extra_args
         return argv, session_id
 
+    def stdin_text(self, request: RunRequest) -> str:
+        """What the process reads as its prompt."""
+        return request.prompt
+
     def _child_env(self) -> dict[str, str]:
         env = os.environ.copy()
         # Force UTF-8 on the pipe; the Windows console default is cp1252.
@@ -232,6 +248,27 @@ class ClaudeRunner:
             session_id=payload.get("session_id"),
             raw=payload,
         )
+
+    def absorb_event(
+        self, event: StreamEvent, texts: list[str], collected: dict
+    ) -> None:
+        """Fold one event into the run's text and totals."""
+        if event.type == "assistant":
+            texts.append(self._assistant_text(event))
+        elif event.type == "result":
+            self._absorb_result(event, collected)
+
+    @staticmethod
+    def join_text(texts: list[str]) -> str:
+        return "".join(texts)
+
+    @staticmethod
+    def turn_error(events: list[StreamEvent]) -> str | None:
+        """The CLI ran, but reported the turn itself as failed."""
+        for event in events:
+            if event.type == "result" and event.raw.get("is_error"):
+                return str(event.raw.get("result") or "claude reported is_error=true")
+        return None
 
     @staticmethod
     def _assistant_text(event: StreamEvent) -> str:
@@ -307,7 +344,7 @@ class ClaudeRunner:
         async def feed_stdin() -> None:
             assert proc.stdin is not None
             try:
-                proc.stdin.write(request.prompt.encode("utf-8"))
+                proc.stdin.write(self.stdin_text(request).encode("utf-8"))
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
@@ -335,10 +372,7 @@ class ClaudeRunner:
                     except Exception:
                         # A misbehaving observer must not kill the run.
                         pass
-                if event.type == "assistant":
-                    assistant_text.append(self._assistant_text(event))
-                elif event.type == "result":
-                    self._absorb_result(event, collected)
+                self.absorb_event(event, assistant_text, collected)
 
         async def pump_stderr() -> str:
             assert proc.stderr is not None
@@ -378,17 +412,16 @@ class ClaudeRunner:
 
         if status is RunStatus.SUCCEEDED and exit_code != 0:
             status = RunStatus.FAILED
-            error = f"claude exited with code {exit_code}"
+            error = f"{self.name} exited with code {exit_code}"
 
-        # A result event flagged is_error means the CLI ran but the turn failed.
-        for event in events:
-            if event.type == "result" and event.raw.get("is_error"):
-                status = RunStatus.FAILED
-                error = error or str(
-                    event.raw.get("result") or "claude reported is_error=true"
-                )
+        # The CLI's own reason beats a bare exit code, but not a timeout.
+        failure = self.turn_error(events)
+        if failure:
+            exit_only = status is RunStatus.FAILED and error and "exited with code" in error
+            status = RunStatus.FAILED
+            error = failure if (exit_only or not error) else error
 
-        text = collected["result_text"] or "".join(assistant_text)
+        text = collected["result_text"] or self.join_text(assistant_text)
 
         return RunResult(
             status=status,
@@ -459,8 +492,8 @@ class ClaudeRunner:
         )
         return await self.run(request, on_event=on_event)
 
-    @staticmethod
-    def is_stale_session(result: RunResult) -> bool:
+    @classmethod
+    def is_stale_session(cls, result: RunResult) -> bool:
         """True when a resume failed because the session no longer exists.
 
         The CLI reports this as plain text on stdout with exit 1 and emits no
@@ -472,7 +505,7 @@ class ClaudeRunner:
         haystack = " ".join(
             (result.text, result.stdout, result.stderr)
         ).lower()
-        return any(marker in haystack for marker in STALE_SESSION_MARKERS)
+        return any(marker in haystack for marker in cls.stale_markers)
 
     # ----------------------------------------------------------------- teardown
 

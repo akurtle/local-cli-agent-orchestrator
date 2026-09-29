@@ -26,7 +26,8 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, OptionList, Static
+from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
 from agentos.repositories.tasks import TaskNotFound
@@ -91,6 +92,12 @@ def summary_line(snapshot: Snapshot) -> str:
     """One line of headline numbers."""
     total = len(snapshot.tasks)
     parts = [f"[bold]{snapshot.project}[/]"]
+    provider = snapshot.provider
+    if provider is not None:
+        parts.append(
+            f"[cyan]{provider.label}[/] [dim]{provider.planning or 'default'}"
+            f" / {provider.execution or 'default'}[/]"
+        )
     objective = snapshot.active_objective
     if objective is not None:
         parts.append(f"objective #{objective.id} [italic]{objective.status.value}[/]")
@@ -438,6 +445,62 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(answer)
 
 
+class ProviderScreen(ModalScreen[str | None]):
+    """Pick the provider the next `agentctl work` uses."""
+
+    DEFAULT_CSS = """
+    ProviderScreen { align: center middle; }
+    ProviderScreen > Vertical {
+        width: 84; height: auto; padding: 1 2;
+        border: thick $accent; background: $surface;
+    }
+    ProviderScreen OptionList { height: auto; margin: 1 0; }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, providers) -> None:
+        super().__init__()
+        self.providers = providers
+
+    def compose(self) -> ComposeResult:
+        options = []
+        for status in self.providers:
+            marker = "[green]> [/]" if status.active else "  "
+            models = (
+                f"planning [bold]{status.planning or 'CLI default'}[/]   "
+                f"execution [bold]{status.execution or 'CLI default'}[/]"
+            )
+            note = "" if status.installed else "   [red]not installed[/]"
+            options.append(
+                Option(
+                    f"{marker}{status.label:<8} {models}{note}",
+                    id=status.name,
+                    disabled=not status.installed,
+                )
+            )
+        with Vertical():
+            yield Static("[bold]Model provider[/]   the manager plans on the planning "
+                         "model; every other agent works on the execution model.")
+            yield OptionList(*options)
+            yield Static("[dim]enter choose   esc cancel.   Applies to the next "
+                         "`agentctl work`; agents start new sessions.[/]")
+
+    def on_mount(self) -> None:
+        options = self.query_one(OptionList)
+        active = next(
+            (i for i, s in enumerate(self.providers) if s.active), 0
+        )
+        options.highlighted = active
+        options.focus()
+
+    def on_option_list_option_selected(self, event) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class DashboardApp(App):
     """Read-only dashboard over a project."""
 
@@ -462,6 +525,7 @@ class DashboardApp(App):
         Binding("n", "focus_attention", "Needs you"),
         Binding("u", "unblock", "Unblock"),
         Binding("R", "retry", "Retry"),
+        Binding("p", "provider", "Provider"),
     ]
 
     snapshot: reactive[Snapshot | None] = reactive(None)
@@ -721,3 +785,26 @@ class DashboardApp(App):
             title={"unblock": "Unblocked", "retry": "Retried"}[verb],
         )
         self.refresh_snapshot()
+
+    # --------------------------------------------------------------- provider
+
+    def action_provider(self) -> None:
+        try:
+            providers = self.reader.providers()
+        except Exception as exc:  # an unreadable config must not kill the UI
+            self.notify(f"Could not read providers: {exc}", severity="error")
+            return
+
+        def chosen(name: str | None) -> None:
+            if not name or any(p.active and p.name == name for p in providers):
+                return
+            status = self.reader.switch_provider(name)
+            self.notify(
+                f"Planning {status.planning or 'default'}, execution "
+                f"{status.execution or 'default'}. Applies to the next "
+                "`agentctl work`.",
+                title=f"Switched to {status.label}",
+            )
+            self.refresh_snapshot()
+
+        self.push_screen(ProviderScreen(providers), chosen)

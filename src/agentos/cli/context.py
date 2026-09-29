@@ -11,6 +11,7 @@ from agentos.branding import CLI_NAME, CONFIG_FILENAME
 from agentos.config import Config, ConfigError, load_config
 from agentos.db.session import Database
 from agentos.paths import ProjectPaths, find_project_root
+from agentos.providers import effective_config
 from agentos.runtime.base import RuntimeNotAvailable
 from agentos.runtime.registry import build_runtime
 from agentos.services.agents import AgentService
@@ -41,6 +42,8 @@ def load_context(start: Path | None = None) -> AppContext:
     except ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from exc
+    # A provider chosen in the dashboard wins over runtime.name in the file.
+    config = effective_config(config, paths)
 
     paths.ensure()
     db = Database(paths.db_file)

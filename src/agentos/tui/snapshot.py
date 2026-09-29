@@ -11,9 +11,16 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import func
 
-from agentos.config import Config
+from agentos.config import Config, ConfigError, load_config
 from agentos.db.session import Database
 from agentos.paths import ProjectPaths
+from agentos.providers import (
+    ProviderStatus,
+    apply_override,
+    provider_statuses,
+    read_override,
+    write_override,
+)
 from agentos.schemas.dto import AgentView, MessageView, ObjectiveView, TaskView
 from agentos.schemas.enums import TaskStatus
 from agentos.services.agents import AgentService
@@ -50,6 +57,8 @@ class Snapshot:
     """Everything the TUI shows, as of one moment."""
 
     project: str
+    provider: ProviderStatus | None = None
+    """The provider the next `agentctl work` will use, with its tier models."""
     agents: list[AgentView] = field(default_factory=list)
     tasks: list[TaskView] = field(default_factory=list)
     objectives: list[ObjectiveView] = field(default_factory=list)
@@ -98,18 +107,41 @@ class SnapshotReader:
 
     def __init__(self, db: Database, config: Config, paths: ProjectPaths) -> None:
         self.db = db
-        self.config = config
         self.paths = paths
-        self.agents = AgentService(db, config, _NullRuntime(), paths.root)
-        self.tasks = TaskService(db, config)
-        self.messages = MessageService(db, config)
-        self.objectives = ObjectiveService(db, config, self.agents, self.tasks)
+        self._use(config)
         # Denials per run never change once the run is recorded, and a run's
         # stdout can be large, so each is parsed once.
         self._denials: dict[int, list[Denial]] = {}
 
     # The only writes the dashboard makes. Both are status changes the CLI
     # offers as `agentctl task unblock|retry`; neither starts an agent.
+
+    def _use(self, config: Config) -> None:
+        self.config = config
+        self.agents = AgentService(self.db, config, _NullRuntime(), self.paths.root)
+        self.tasks = TaskService(self.db, config)
+        self.messages = MessageService(self.db, config)
+        self.objectives = ObjectiveService(self.db, config, self.agents, self.tasks)
+
+    # ----------------------------------------------------------------- providers
+
+    def file_config(self) -> Config:
+        """agentos.yaml as written, before any provider override."""
+        try:
+            return load_config(self.paths.config_file)
+        except ConfigError:
+            return self.config  # no file (tests), or one mid-edit
+
+    def providers(self) -> list[ProviderStatus]:
+        config = self.file_config()
+        active = read_override(self.paths) or config.runtime.name
+        return provider_statuses(config, active)
+
+    def switch_provider(self, name: str) -> ProviderStatus:
+        """Choose the provider the next `agentctl work` uses. Runs nothing."""
+        write_override(self.paths, name)
+        self._use(apply_override(self.file_config(), name))
+        return next(p for p in self.providers() if p.name == name)
 
     def unblock(self, key: str) -> TaskView:
         return self.tasks.unblock(key)
@@ -126,6 +158,7 @@ class SnapshotReader:
         objectives = self.objectives.list_objectives()
         return Snapshot(
             project=self.config.project.name,
+            provider=next((p for p in self.providers() if p.active), None),
             agents=self.agents.list_agents(),
             tasks=tasks,
             objectives=objectives,
