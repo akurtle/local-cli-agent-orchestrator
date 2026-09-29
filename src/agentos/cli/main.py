@@ -25,6 +25,7 @@ from agentos.cli.agent_commands import (
     pause_agent_command,
 )
 from agentos.cli.context import load_context
+from agentos.cli.glyphs import safe
 from agentos.cli.context_commands import (
     context_command,
     list_memory_command,
@@ -715,7 +716,7 @@ def list_runs(
             "-" if row.exit_code is None else str(row.exit_code),
             row.started_at.strftime("%Y-%m-%d %H:%M:%S"),
             (row.session_id or "-")[:8],
-            (row.result_text or "").replace("\n", " ")[:200],
+            safe((row.result_text or "").replace("\n", " ")[:200]),
         )
     console.print(table)
     ctx.db.dispose()
@@ -756,8 +757,10 @@ def show_run(
         except (json.JSONDecodeError, TypeError):
             console.print(f"Command:   {row.command}")
         if row.error:
-            console.print(f"[red]Error:     {row.error}[/]")
-        console.print(Panel(row.result_text or "[dim](empty)[/]", title="result"))
+            console.print(f"[red]Error:     {safe(row.error)}[/]")
+        console.print(
+            Panel(safe(row.result_text) or "[dim](empty)[/]", title="result")
+        )
         if row.stderr.strip():
             console.print(Panel(row.stderr.strip()[:4000], title="stderr"))
     ctx.db.dispose()

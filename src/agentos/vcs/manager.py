@@ -139,6 +139,59 @@ def parse_shortstat(output: str) -> tuple[int, int]:
     return insertions, deletions
 
 
+@dataclass(frozen=True)
+class FileDelta:
+    """Line counts for one file, relative to the branch's starting point."""
+
+    path: str
+    added: int = 0
+    removed: int = 0
+    is_new: bool = False
+    binary: bool = False
+
+    @property
+    def churn(self) -> int:
+        return self.added + self.removed
+
+
+def parse_numstat(output: str) -> list[FileDelta]:
+    """Parse `git diff --numstat --no-renames`. Binary files report `-`."""
+    deltas: list[FileDelta] = []
+    for line in (output or "").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3 or not parts[2].strip():
+            continue
+        added, removed, path = parts
+        binary = added == "-" or removed == "-"
+        deltas.append(
+            FileDelta(
+                path=path.strip(),
+                added=0 if binary else int(added),
+                removed=0 if binary else int(removed),
+                binary=binary,
+            )
+        )
+    return deltas
+
+
+# An untracked file bigger than this is counted, not read.
+MAX_COUNTED_BYTES = 2_000_000
+
+
+def count_new_file(path: Path, relative: str) -> FileDelta:
+    """Describe an untracked file, which `git diff` cannot."""
+    try:
+        if path.stat().st_size > MAX_COUNTED_BYTES:
+            return FileDelta(path=relative, is_new=True, binary=True)
+        data = path.read_bytes()
+    except OSError:
+        return FileDelta(path=relative, is_new=True)
+    if b"\0" in data[:8000]:
+        return FileDelta(path=relative, is_new=True, binary=True)
+    lines = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+    return FileDelta(path=relative, added=lines, is_new=True)
+
+
 def branch_for(agent: str) -> str:
     """Branch name for an agent, sanitised for git's refname rules."""
     safe = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in agent.strip())
@@ -370,6 +423,46 @@ class GitManager:
                 ["git", "diff"], 1, f"{agent} has no worktree at {path}"
             )
         return await self.diff(cwd=path, name_only=name_only)
+
+    async def changes_since(self, base: str, cwd: Path) -> list[FileDelta]:
+        """Everything a worktree has that `base` does not, file by file.
+
+        Measured from the merge base, so commits on the agent branch and
+        uncommitted edits both count, while work that landed on `base` after
+        the branch was cut does not. Untracked files are counted separately
+        because `git diff` never sees them.
+        """
+        target = Path(cwd)
+        fork = await self._run("merge-base", base, "HEAD", cwd=target, check=False)
+        start = fork.text if fork.ok and fork.text else "HEAD"
+        numstat = await self._run(
+            "diff", "--numstat", "--no-renames", start, cwd=target, check=False
+        )
+        deltas = parse_numstat(numstat.stdout)
+
+        added = await self._run(
+            "diff", "--name-only", "--no-renames", "--diff-filter=A", start,
+            cwd=target, check=False,
+        )
+        created = set(added.stdout.splitlines())
+        deltas = [
+            FileDelta(d.path, d.added, d.removed, d.path in created, d.binary)
+            for d in deltas
+        ]
+
+        untracked = await self._run(
+            "ls-files", "--others", "--exclude-standard", cwd=target, check=False
+        )
+        for relative in untracked.stdout.splitlines():
+            if relative.strip():
+                deltas.append(count_new_file(target / relative, relative))
+        return deltas
+
+    async def commits_ahead(self, base: str, cwd: Path) -> int:
+        result = await self._run(
+            "rev-list", "--count", f"{base}..HEAD", cwd=Path(cwd), check=False
+        )
+        return int(result.text) if result.ok and result.text.isdigit() else 0
 
     # -------------------------------------------------------------------- commits
 

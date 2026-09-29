@@ -72,6 +72,11 @@ class AgentPaused(RuntimeError):
     """The agent is paused and will not accept work."""
 
 
+# The CLI's shell tools. On Windows an agent reaches for PowerShell first, so a
+# rule written for Bash alone leaves the same command declined there.
+SHELL_TOOLS = ("Bash", "PowerShell")
+
+
 def shell_allowed_tools(
     config: Config, capabilities: frozenset[Capability]
 ) -> list[str]:
@@ -86,9 +91,10 @@ def shell_allowed_tools(
         return []
     denied = {name.lower() for name in config.commands.denied}
     return [
-        f"Bash({program}:*)"
+        f"{tool}({program}:*)"
         for program in config.commands.allowed
         if program.lower() not in denied
+        for tool in SHELL_TOOLS
     ]
 
 
@@ -102,7 +108,11 @@ def shell_denied_tools(
     """
     if Capability.RUN_COMMAND not in capabilities:
         return []
-    return [f"Bash({pattern}:*)" for pattern in config.commands.require_approval]
+    return [
+        f"{tool}({pattern}:*)"
+        for pattern in config.commands.require_approval
+        for tool in SHELL_TOOLS
+    ]
 
 
 class AgentService:

@@ -5,7 +5,7 @@ Layout, per the spec:
     +---- AGENTS ----+  +---- TASKS ----+
     |                |  |               |
     +----------------+  +---------------+
-    +------------- MESSAGES ------------+
+    +--- CHANGES ----+  +-- MESSAGES ---+
     +----------- AGENT OUTPUT ----------+
 
 Widgets only display a `Snapshot` and translate keystrokes into selections. All
@@ -18,13 +18,24 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Static
+from textual.worker import get_current_worker
 
 from agentos.schemas.enums import AgentStatus, TaskStatus
+from agentos.tui.changes import (
+    AgentChanges,
+    ChangesReader,
+    agent_summary,
+    latest_task,
+)
 from agentos.tui.snapshot import Snapshot, SnapshotReader
 
 REFRESH_SECONDS = 2.0
+# A changes scan runs git in every worktree, so it runs less often than the
+# database refresh, and off the UI thread.
+CHANGES_SECONDS = 5.0
 
 AGENT_STATUS_STYLE = {
     AgentStatus.IDLE: "green",
@@ -126,6 +137,43 @@ class TasksPanel(DataTable):
             )
 
 
+def lines_label(added: int, removed: int) -> str:
+    return f"[green]+{added}[/] [red]-{removed}[/]"
+
+
+class ChangesPanel(DataTable):
+    """Per-agent change totals. Selecting a row shows the breakdown."""
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.add_columns("Agent", "Task", "Lines", "Files", "Where")
+
+    def show(self, snapshot: Snapshot, changes: list[AgentChanges]) -> None:
+        self.clear()
+        for entry in changes:
+            if entry.shared:
+                running = [
+                    t.key for name in entry.agents
+                    if (t := latest_task(snapshot, name))
+                    and t.status is TaskStatus.RUNNING
+                ]
+                label = ", ".join(running) or "-"
+            else:
+                task = latest_task(snapshot, entry.agent)
+                label = task.key if task else "-"
+            where = ", ".join(a.path for a in entry.areas[:2])
+            if len(entry.areas) > 2:
+                where += f" +{len(entry.areas) - 2}"
+            self.add_row(
+                entry.agent,
+                label,
+                lines_label(entry.added, entry.removed),
+                str(len(entry.files)),
+                where,
+                key=entry.agent,
+            )
+
+
 class MessagesPanel(Static):
     def show(self, snapshot: Snapshot) -> None:
         if not snapshot.messages:
@@ -169,6 +217,73 @@ class OutputPanel(Static):
             lines.append("")
         self.update("\n".join(lines))
 
+    def show_changes(
+        self, snapshot: Snapshot, changes: list[AgentChanges], agent: str
+    ) -> None:
+        entry = next((c for c in changes if c.agent == agent), None)
+        if entry is None:
+            self.update(f"[dim]{agent} has no changes.[/]")
+            return
+        if entry.shared:
+            lines = [
+                f"[bold]project directory[/]  {entry.branch or '-'}, uncommitted   "
+                f"{lines_label(entry.added, entry.removed)}   "
+                f"{len(entry.files)} files ({entry.new_files} new)",
+                "[dim]Agents without a worktree all edit here, so these changes "
+                "cannot be pinned to one of them. Set `worktree: true` on an agent "
+                "to separate its work.[/]",
+            ]
+        else:
+            lines = [
+                f"[bold]{entry.agent}[/]  {entry.branch or '-'} vs {entry.base}   "
+                f"{lines_label(entry.added, entry.removed)}   "
+                f"{len(entry.files)} files ({entry.new_files} new)   "
+                f"{entry.commits_ahead} commit(s) ahead",
+            ]
+
+        lines += ["", "[bold]summary[/]"]
+        tasks = [
+            (name, t) for name in entry.agents or [entry.agent]
+            if (t := latest_task(snapshot, name))
+        ]
+        if not tasks:
+            lines.append("[dim]No task recorded for this work.[/]")
+        for name, task in tasks:
+            who = f"{name} " if entry.shared else ""
+            lines.append(
+                f"{who}[bold]{task.key}[/] {task.title}  "
+                f"[italic]{task.status.value}[/]"
+            )
+            summary = agent_summary(task.result)
+            limit = 300 if entry.shared else 800
+            lines.append(
+                f"  {summary[:limit]}"
+                if summary
+                else "  [dim]No summary until the task reports.[/]"
+            )
+
+        lines += ["", "[bold]where[/]"]
+        for area in entry.areas[:8]:
+            lines.append(
+                f"  {area.path:<32} {area.files:>3} files  "
+                f"{lines_label(area.added, area.removed)}"
+            )
+
+        major = entry.major()
+        lines += ["", "[bold]largest changes[/]"]
+        for delta in major:
+            if delta.binary:
+                size = "[dim]binary[/]"
+            else:
+                size = lines_label(delta.added, delta.removed)
+            marker = "[green]new[/] " if delta.is_new else "    "
+            lines.append(f"  {marker}{delta.path}  {size}")
+        if len(entry.files) > len(major):
+            lines.append(f"  [dim]...and {len(entry.files) - len(major)} more[/]")
+        hint = "git diff" if entry.shared else f"agentctl diff {entry.agent}"
+        lines += ["", f"[dim]full diff: {hint}[/]"]
+        self.update("\n".join(lines))
+
     def show_task(self, snapshot: Snapshot, key: str) -> None:
         task = snapshot.task(key)
         if task is None:
@@ -199,9 +314,11 @@ class DashboardApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #top { height: 40%; }
+    #top { height: 35%; }
+    #middle { height: 25%; }
     #agents, #tasks { width: 1fr; border: round $accent; }
-    #messages { height: 20%; border: round magenta; }
+    #changes { width: 1fr; border: round green; }
+    #messages { width: 1fr; border: round magenta; }
     #output { height: 1fr; border: round $accent; overflow-y: auto; }
     #summary { height: auto; padding: 0 1; }
     """
@@ -211,15 +328,21 @@ class DashboardApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("a", "focus_agents", "Agents"),
         Binding("t", "focus_tasks", "Tasks"),
+        Binding("c", "focus_changes", "Changes"),
     ]
 
     snapshot: reactive[Snapshot | None] = reactive(None)
 
-    def __init__(self, reader: SnapshotReader) -> None:
+    def __init__(
+        self, reader: SnapshotReader, changes: ChangesReader | None = None
+    ) -> None:
         super().__init__()
         self.reader = reader
+        self.changes_reader = changes or ChangesReader(reader.paths, reader.config)
+        self.changes: list[AgentChanges] = []
         self._selected_agent: str | None = None
         self._selected_task: str | None = None
+        self._selected_changes: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -227,24 +350,68 @@ class DashboardApp(App):
         with Horizontal(id="top"):
             yield AgentsPanel(id="agents")
             yield TasksPanel(id="tasks")
-        yield MessagesPanel("", id="messages")
+        with Horizontal(id="middle"):
+            yield ChangesPanel(id="changes")
+            yield MessagesPanel("", id="messages")
         with Vertical():
             yield OutputPanel("[dim]Select an agent or task.[/]", id="output")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = "agentos"
+        for selector in ("#agents", "#tasks", "#changes", "#messages"):
+            self.query_one(selector).border_title = selector[1:]
         self.refresh_snapshot()
         # Polling is fine here: reads are cheap and WAL means they never block
         # a running scheduler. A change feed would be a lot of machinery for a
         # viewer.
         self.set_interval(REFRESH_SECONDS, self.refresh_snapshot)
+        self.refresh_changes()
+        self.set_interval(CHANGES_SECONDS, self.refresh_changes)
 
     def refresh_snapshot(self) -> None:
         try:
             self.snapshot = self.reader.read()
         except Exception as exc:  # a transient read must not kill the UI
             self.query_one("#summary", Static).update(f"[red]read failed: {exc}[/]")
+
+    def refresh_changes(self) -> None:
+        # exclusive: a slow scan is replaced rather than queued behind.
+        self.run_worker(
+            self._scan_changes, thread=True, exclusive=True, group="changes"
+        )
+
+    def _scan_changes(self) -> None:
+        try:
+            found = self.changes_reader.read()
+        except Exception as exc:  # git trouble must not kill the UI
+            found = exc
+        if get_current_worker().is_cancelled:
+            return  # the app is closing; its panels may already be gone
+        if isinstance(found, Exception):
+            self.call_from_thread(self._changes_failed, found)
+        else:
+            self.call_from_thread(self.apply_changes, found)
+
+    def apply_changes(self, changes: list[AgentChanges]) -> None:
+        self.changes = changes
+        try:
+            panel = self.query_one("#changes", ChangesPanel)
+        except NoMatches:  # a scan that finished as the app shut down
+            return
+        panel.border_subtitle = ""
+        if self.snapshot is None:
+            return
+        panel.show(self.snapshot, changes)
+        if self._selected_changes:
+            self._refresh_output(self.snapshot)
+
+    def _changes_failed(self, exc: Exception) -> None:
+        try:
+            panel = self.query_one("#changes", ChangesPanel)
+        except NoMatches:
+            return
+        panel.border_subtitle = f"scan failed: {exc}"[:60]
 
     def watch_snapshot(self, snapshot: Snapshot | None) -> None:
         if snapshot is None:
@@ -253,6 +420,7 @@ class DashboardApp(App):
         self.query_one("#agents", AgentsPanel).show(snapshot)
         self.query_one("#tasks", TasksPanel).show(snapshot)
         self.query_one("#messages", MessagesPanel).show(snapshot)
+        self.query_one("#changes", ChangesPanel).show(snapshot, self.changes)
         self._refresh_output(snapshot)
 
     def select_agent(self, name: str) -> None:
@@ -263,18 +431,32 @@ class DashboardApp(App):
         output pane has to prefer one.
         """
         self._selected_agent, self._selected_task = name, None
+        self._selected_changes = None
         if self.snapshot is not None:
             self._refresh_output(self.snapshot)
 
     def select_task(self, key: str) -> None:
         """Show a task in the output pane, clearing any selected agent."""
         self._selected_task, self._selected_agent = key, None
+        self._selected_changes = None
+        if self.snapshot is not None:
+            self._refresh_output(self.snapshot)
+
+    def select_changes(self, agent: str) -> None:
+        """Show an agent's change breakdown, clearing other selections."""
+        self._selected_changes = agent
+        self._selected_agent = self._selected_task = None
         if self.snapshot is not None:
             self._refresh_output(self.snapshot)
 
     def _refresh_output(self, snapshot: Snapshot) -> None:
-        output = self.query_one("#output", OutputPanel)
-        if self._selected_task:
+        try:
+            output = self.query_one("#output", OutputPanel)
+        except NoMatches:  # a late highlight event while the app shuts down
+            return
+        if self._selected_changes:
+            output.show_changes(snapshot, self.changes, self._selected_changes)
+        elif self._selected_task:
             output.show_task(snapshot, self._selected_task)
         elif self._selected_agent:
             output.show_agent(snapshot, self._selected_agent)
@@ -285,6 +467,8 @@ class DashboardApp(App):
             return
         if isinstance(event.data_table, AgentsPanel):
             self.select_agent(key)
+        elif isinstance(event.data_table, ChangesPanel):
+            self.select_changes(key)
         else:
             self.select_task(key)
 
@@ -296,3 +480,6 @@ class DashboardApp(App):
 
     def action_focus_tasks(self) -> None:
         self.query_one("#tasks", TasksPanel).focus()
+
+    def action_focus_changes(self) -> None:
+        self.query_one("#changes", ChangesPanel).focus()

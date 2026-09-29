@@ -394,6 +394,9 @@ async def test_command_policy_reaches_the_shell(db, config, tmp_path) -> None:
     request = runtime.requests[0]
     assert "Bash(npm:*)" in request.allowed_tools
     assert "Bash(pytest:*)" in request.allowed_tools
+    # On Windows agents use PowerShell too; the same command must pass there.
+    assert "PowerShell(npm:*)" in request.allowed_tools
+    assert "PowerShell(git push:*)" in request.disallowed_tools
     # Needs a human, so it must not ride on the `git` allowance.
     assert "Bash(git push:*)" in request.disallowed_tools
 
@@ -417,4 +420,4 @@ def test_denied_program_is_never_pre_approved() -> None:
         }
     )
     tools = shell_allowed_tools(config, frozenset({Capability.RUN_COMMAND}))
-    assert tools == ["Bash(npm:*)"]
+    assert tools == ["Bash(npm:*)", "PowerShell(npm:*)"]
