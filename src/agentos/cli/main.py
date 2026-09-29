@@ -1,8 +1,4 @@
-"""The `agentctl` command line.
-
-Phase 1 scope: init, doctor, claude-test, runs, run-show. Agent/task/message
-commands arrive in later phases.
-"""
+"""The `agentctl` command line."""
 
 from __future__ import annotations
 
@@ -74,7 +70,7 @@ from agentos.services.runs import record_run
 
 app = typer.Typer(
     name=CLI_NAME,
-    help=f"{APP_NAME}: orchestrate multiple Claude CLI agents locally.",
+    help=f"{APP_NAME}: orchestrate multiple coding-agent CLI sessions locally.",
     no_args_is_help=True,
     add_completion=False,
 )

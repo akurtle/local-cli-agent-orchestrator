@@ -1,14 +1,14 @@
 project:
   name: Orchestrator Dev
-  description: "Local multi-agent orchestration over the Claude Code CLI."
+  description: "Local multi-agent orchestration for coding-agent CLIs."
 
 orchestrator:
   max_concurrent_agents: 3
   default_timeout_seconds: 900
   max_task_retries: 1
 
-# Only "claude" is implemented today. The section exists so other agent CLIs
-# (codex, gemini, ollama) can be plugged in later without config churn.
+# Supported runtimes are "claude" and "codex". Both use the existing login for
+# their installed CLI; switch temporarily with `agentctl provider codex`.
 runtime:
   name: claude
   # executable: C:/path/to/claude.exe   # optional; resolved from PATH if unset

@@ -5,8 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentos"
 version = "0.1.0"
-description = "Local CLI-first multi-agent orchestration over the Claude Code CLI"
+description = "Local CLI-first orchestration for Claude Code and OpenAI Codex agents"
+readme = "README.md"
 requires-python = ">=3.12"
+keywords = ["ai-agents", "claude-code", "codex", "orchestration", "developer-tools"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
     "sqlalchemy>=2.0",
     "pydantic>=2.7",
@@ -21,6 +30,11 @@ tui = ["textual>=0.60"]
 
 [project.scripts]
 agentctl = "agentos.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/akurtle/local-cli-agent-orchestrator"
+Issues = "https://github.com/akurtle/local-cli-agent-orchestrator/issues"
+Repository = "https://github.com/akurtle/local-cli-agent-orchestrator.git"
 
 [tool.setuptools.packages.find]
 where = ["src"]

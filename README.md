@@ -1,571 +1,381 @@
 # agentos
 
-A local, CLI-first multi-agent orchestration system. Multiple Claude Code CLI
-processes act as workers; all orchestration logic — scheduling, task state,
-dependencies, messaging, process lifecycle, Git isolation — is deterministic
-Python.
+**A local, CLI-first orchestrator for teams of coding agents.**
 
-**The orchestrator is not an LLM.** Agents decide engineering questions; Python
-decides everything else.
+agentos turns a software objective into a dependency-aware task graph, runs the
+tasks across Claude Code or OpenAI Codex CLI sessions, verifies the results, and
+keeps a human in control of planning and integration.
 
-## Constraints this project honours
+The orchestrator itself is deterministic Python, not another model. Models make
+engineering decisions; agentos owns scheduling, state transitions, permissions,
+process lifecycle, verification, and Git isolation.
 
-- No direct use of the Anthropic API.
-- No `ANTHROPIC_API_KEY`. Auth is inherited from your existing Claude Code login.
-- `claude` is treated as an external worker process, nothing more.
-- Nothing an agent emits is ever passed to a shell.
+> [!IMPORTANT]
+> agentos is experimental, pre-1.0 software. It can launch paid model sessions
+> and allow agents to modify a working tree. Start in a disposable branch or
+> repository, review the generated plan, and inspect every diff before merging.
 
-## Status: phase 18 complete (of an ongoing production-hardening series)
+## Why agentos?
 
-The manager decomposes an objective into a validated task graph; agents execute
-it concurrently in isolated git worktrees, message each other and request
-follow-up work. Branches are integrated conservatively, human approval gates the
-actions that matter, and there is both a Rich CLI and a Textual dashboard.
+- **Bring your existing login.** It drives the installed `claude` or `codex`
+  CLI and does not require application code to handle provider API keys.
+- **Run specialists concurrently.** Assign arbitrary roles to persistent agents
+  and schedule independent tasks in parallel.
+- **Keep work isolated.** Coding agents can work on dedicated Git branches and
+  worktrees instead of sharing one checkout.
+- **Treat model output as untrusted.** Structured responses are validated before
+  they can change orchestrator state, and claimed file changes are checked
+  against Git.
+- **Verify before completing.** Agent success claims pass through configurable
+  test and lint commands before dependent tasks can continue.
+- **Retain operator control.** Plans, risky commands, and merges can require
+  explicit approval. Integration is a report-only operation unless `--apply` is
+  provided.
+- **Keep an audit trail.** SQLite stores tasks, runs, messages, denials,
+  verification results, and events locally under `.agentos/`.
 
-| Phase | Scope | State |
-|---|---|---|
-| 1 | Foundation, runtime adapter, CLI | **done** |
-| 2 | Persistent agents, role prompts, sessions | **done** |
-| 3 | Tasks, dependencies, scheduler | **done** |
-| 4 | Messaging, inboxes, structured responses | **done** |
-| 5 | Manager agent planning | **done** |
-| 6 | Git worktree isolation | **done** |
-| 7 | Orchestration loop hardening | **done** |
-| 8 | Rich dashboard | **done** |
-| 9 | Configurable agent definitions | **done** |
-| 10 | Integrator | **done** |
-| 11 | Approval gates | **done** |
-| 12 | Textual TUI | **done** |
-| 13 | Context and memory management | **done** |
-| 14 | Capabilities and permissions | **done** |
-| 15 | Safe command execution | **done** |
-| 16 | Event bus and observability | **done** |
-| 17 | Replanning and failure recovery | **done** |
-| 18 | Verification pipeline | **done** |
+## How it works
 
-## Install
+```text
+objective
+    |
+    v
+manager creates a plan --> human approval
+    |
+    v
+dependency graph --> ready tasks run concurrently
+    |                         |
+    |                         +--> isolated agent sessions/worktrees
+    v
+verification checks --> review diffs --> explicit integration
+```
+
+The default roster contains manager, backend, frontend, QA, and reviewer roles,
+but neither those names nor that team shape are required. Roles, prompts, model
+tiers, capabilities, and worktree isolation are configured per project.
+
+## Requirements
+
+- Python 3.12 or newer
+- Git, recommended for worktree isolation and integration
+- At least one installed and authenticated agent CLI:
+  - Claude Code, available as `claude`
+  - OpenAI Codex, available as `codex`
+
+The current release is developed and tested primarily on Windows. The runtime
+contains POSIX process handling as well, but Linux and macOS support should be
+considered best effort until cross-platform CI is in place.
+
+## Install from source
+
+agentos is not currently published as a package, so install it from a clone.
 
 ```bash
+git clone https://github.com/akurtle/local-cli-agent-orchestrator.git
+cd local-cli-agent-orchestrator
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[dev]"   # includes the TUI
 ```
 
-## Command overview
+Activate the environment:
 
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 ```
-agentctl init | doctor                      set up and check a project
-agentctl run "<objective>"                  manager plans, you approve
-agentctl work [--dry-run]                   execute ready tasks
-agentctl status [--watch N] | dashboard     Rich view | Textual view
-agentctl agents | agent show|run            per-agent inspection and invocation
-agentctl tasks | task create|show|cancel|retry|unblock
-agentctl messages | message <agent> "..."   the message bus
-agentctl diff <agent> | git status          what an agent changed
-agentctl integrate [--apply]                merge branches that merge cleanly
-agentctl logs <agent> | runs | run-show     invocation history
-agentctl context <agent> [--full|--layer]   what the next prompt will contain
-agentctl memories | memory add|forget       what the orchestrator remembers
-agentctl memory handoffs                    packets passed between agents
-agentctl permissions [agent]                what each agent may do
-agentctl permission grant|revoke|denials    adjust and audit permissions
-agentctl commands [agent] [--verdict]       what agents ran, including refusals
-agentctl command-check <cmd...>             what the policy would do
-agentctl approvals                          commands waiting for a human
-agentctl timeline [--task|--agent|--category]  execution history
-agentctl watch                              new events as they occur
-agentctl stats                               run metrics
-agentctl replan [--reason|--task]            have the manager repair the graph
-agentctl pause|resume <agent>               take an agent out of rotation
-agentctl provider [claude|codex] [--reset]  model provider and tier models
-```
-
-## Providers and model tiers
-
-Agents run on Claude Code (`claude`) or OpenAI Codex (`codex exec`), using each
-CLI's existing login. The manager plans on the provider's strongest model; every
-other agent works on a faster one:
-
-| provider | planning (manager) | execution (others) |
-|---|---|---|
-| claude | claude-opus-5-5 | claude-sonnet-5 |
-| codex | gpt-6-astra | gpt-6-luna |
-
-Switch per project with `p` in the dashboard or `agentctl provider codex`; the
-choice is stored in `.agentos/provider` and applies to the next `work`. Override
-models under `providers.<name>.planning|execution`, move an agent between tiers
-with `tier:`, or pin one with `model:`.
-
-Codex has no per-tool allowlist, so capabilities map onto its sandbox instead:
-agents that may edit get `workspace-write` (no network), the rest `read-only`,
-with approval prompts off. `commands.allowed` is enforced up front only on
-Claude; the git and verification checks after a run apply to both.
-
-## Verify Phase 1
 
 ```bash
-.venv\Scripts\python.exe -m pytest -q          # 823 tests, no network, no cost
-.venv\Scripts\agentctl.exe init --name "My Project"
-.venv\Scripts\agentctl.exe doctor              # detects the claude CLI
-.venv\Scripts\agentctl.exe claude-test "Say hello in exactly three words."
-.venv\Scripts\agentctl.exe runs
-.venv\Scripts\agentctl.exe run-show 1
+# macOS or Linux
+source .venv/bin/activate
 ```
 
-Session continuity (the same Claude session across two separate processes):
+Then install the CLI. The `tui` extra adds the interactive dashboard; `dev`
+adds the dashboard and test tooling.
 
 ```bash
-.venv\Scripts\agentctl.exe claude-test "Remember the codeword TITANIUM. Reply OK."
-.venv\Scripts\agentctl.exe claude-test "What was the codeword?" --session <id-printed-above>
+python -m pip install --upgrade pip
+python -m pip install -e ".[tui]"
 ```
 
-## Architecture notes
+## Quick start
 
-### Session IDs are ours, not scraped
-The CLI accepts `--session-id <uuid>`, so the orchestrator **mints** a UUID and
-owns it from the start, then resumes with `--resume <uuid>`. Parsing output only
-*confirms* the ID. Each agent therefore keeps its own independent Claude session.
+With the installation environment still active, move into the repository you
+want agentos to manage:
 
-### Prompts travel over stdin
-Windows caps a command line near 32 KB, and prompts will carry role + inbox +
-task text. Prompts are never placed on argv; there is a test enforcing this.
-
-### One place spawns processes
-`runtime/claude_cli.py` is the only module permitted to spawn the agent.
-Everything else speaks `RunRequest` / `RunResult`. `runtime/base.py` defines the
-protocol so a future `codex`/`gemini`/`ollama` runtime slots in without touching
-the scheduler.
-
-### Windows specifics
-- The **Proactor** event loop is required for asyncio subprocesses; we never
-  install `WindowsSelectorEventLoopPolicy`.
-- There is no `SIGTERM`, and `claude` spawns children, so timeout/cancel
-  escalates to `taskkill /T /F` to kill the whole tree rather than orphan it.
-- Pipes are decoded as UTF-8 with `errors="replace"` (the console is cp1252).
-- The executable is resolved via `shutil.which` so `.exe` / `.cmd` shims work.
-- A legacy console is cp1252, where printing `●` raises and kills the
-  command, so glyphs degrade to ASCII and agent text is sanitised before render.
-
-### Model output is untrusted
-Agents emit prose plus a delimited JSON block
-(`<<<AGENT_RESPONSE … AGENT_RESPONSE>>>`) validated by Pydantic before any state
-changes. Unknown fields are dropped, unknown statuses rejected, and the *last*
-block wins so a model restating the format mid-reasoning cannot hijack the
-result. `files_changed` is a claim to verify against `git diff`, not a fact.
-
-### Roles are arbitrary strings
-The five starter agents are a convenience, not a requirement. A role is any
-string; an unrecognised one gets a neutral brief, so `database`, `mobile` or
-`security` work with no code change. Each agent may point at its own prompt file.
-Even the planning role is configurable via `orchestrator.manager_role`, so a
-roster whose lead is called `architect` needs nothing special.
-
-An agent removed from the config is marked `offline` rather than deleted: its runs
-and session are history worth keeping, but it stops being eligible for work.
-Putting it back in the config brings it online again.
-
-### One dashboard, derived not stored
-`agentctl status` shows objectives, agents, a task progress bar, recent messages
-and anything holding a blocker. Every number is computed from services on each
-render, so the view cannot drift from the database. `--watch N` re-renders on a
-timer; WAL mode means those reads never block a running scheduler.
-
-Rendering never decides state and never queries the database directly, and it is
-tested for content rather than exact layout so a column-width change does not
-break the suite. There is a test that every task and objective status renders, so
-adding one later cannot blow up the dashboard.
-
-### Why a task failed decides what happens next
-`FailureKind` separates the cases the spec asks about, and the retry policy
-differs for each:
-
-| kind | meaning | policy |
-|---|---|---|
-| `launch` / `timeout` | the process would not start, or was killed | retry |
-| `unparseable` | ran, but produced no usable response block | repair, then retry |
-| `agent_failed` | ran, and the agent reported failure | retry |
-| `blocked` | the agent cannot proceed | **never retried** |
-| `unavailable` | the agent was busy or paused | requeued, no attempt consumed |
-
-A blocker is not retried because another attempt would hit the same wall and
-spend more usage. The task goes to `blocked` with `needs_intervention`, which
-readiness deliberately leaves alone -- otherwise a task whose dependencies are all
-complete would be marked ready again and sent straight back. `agentctl task
-unblock <id>` clears it once the operator has dealt with the cause.
-
-### Ctrl+C twice
-The first interrupt stops launching new work and lets running agents finish, so
-their results are recorded rather than discarded. The second cancels them; the
-runtime kills the process tree and the task returns to the queue. Task rows are
-written as each task settles, so the database is consistent at any point.
-
-### Agents work in isolated worktrees
-An agent with `worktree: true` gets `worktrees/<name>` on branch `agent/<name>`,
-so two coding agents never edit the same checkout. Creation is idempotent because
-it runs before every task, and removing a worktree keeps the branch by default --
-that branch holds the work, and discarding it silently would destroy the thing the
-operator still needs to review.
-
-If isolation is configured but git cannot provide it (no repository, no commits),
-the task runs in the project directory with a warning rather than stalling the
-queue. The operator asked for work to happen.
-
-### `files_changed` is a claim, checked against git
-After an isolated task, the orchestrator reads `git status` and records the real
-changed files and diff summary. Anything the agent claimed but git does not show
-is reported as an unverified claim. For a *shared* directory no attribution is
-possible -- concurrent agents and our own state files all appear as changes -- so
-capture is skipped entirely rather than crediting one task with another's work.
-
-### An agent's claim is not a fact
-`status: completed` in a response block moves a task to `agent_done` and no
-further. The orchestrator then runs the configured checks and decides:
-
-```
-RUNNING -> AGENT_DONE -> VERIFYING -> COMPLETED
-                                   -> FAILED_VERIFICATION
+```bash
+cd /path/to/your/project
+agentctl init --name "My Project"
 ```
 
-`failed_verification` blocks dependents exactly like a failure, so downstream work
-cannot proceed on unverified output, and an objective cannot complete while any
-task failed its checks on the latest attempt.
+`init` creates `agentos.yaml`, initializes `.agentos/agentos.db`, and adds the
+agentos state and worktree directories to `.gitignore` when run in a Git
+repository.
 
-Acceptance criteria are split honestly rather than pretended to be checkable:
-`automated` (it names a command), `review` (it asks for judgement), `manual`
-(everything else). Only automated criteria feed the verdict; the rest are reported
-so nobody mistakes "the tests passed" for "every criterion was met". Classification
-is deliberately conservative -- "Tests pass" is *not* automated, because guessing
-which command that means would invent a check nobody asked for.
+Choose a provider if the default (`claude`) is not the one you want, then check
+the configuration and CLI installation:
 
-Three distinctions the verdict keeps straight: a **failed** check rejects the
-claim; an **error** (the check could not run) also rejects it, because that is not
-evidence the work is fine; a **skipped** check (denied by policy) gives no grounds
-to reject but does not count as verification either. With nothing configured, a
-task still completes -- otherwise every project without a test command would stall.
-
-Checks run through the same command policy, directory boundary and timeout as
-anything else, but as an internal principal rather than as the agent, so a reviewer
-without `run_command` still has its work verified.
-
-### Replanning mutates the graph, under supervision
-After a failure the manager can be asked to repair the plan. It returns
-**operations** rather than a new plan, because the graph already has history:
-create_task, add_dependency, remove_dependency, cancel_task, retry_task,
-reassign_task. `validate_operations` is pure, so every refusal rule is tested
-without a database.
-
-The invariant it defends is that **completed history is immutable**. Python refuses
-to touch a completed or cancelled task, to cancel a running one, to retry anything
-that is not failed or blocked, to reference a task or agent that does not exist, or
-to create a cycle -- checked across the live graph *plus* every edge the replan
-adds, so two individually-safe edges that close a loop together are caught.
-
-A rejected operation does not stop the rest, but it is reported: silently dropping
-one would make a partial application look like a full one.
-
-Automatic replanning is off by default. An unattended replan spends usage on every
-failure, and a wrong corrective plan is harder to unpick than a stalled one.
-
-### Events explain, they do not decide
-Everything important emits an event, persisted to SQLite and fanned out in-process.
-Events exist for debugging and observability and are explicitly **not** the system
-of record: an event says a transition happened, while the tasks table says what is
-true now.
-
-Emitting can never break orchestration. A failing subscriber is isolated, and a
-failing write is swallowed with the event still delivered in memory -- losing a log
-line is always better than losing the work it describes.
-
-`agentctl timeline --task AUTH-3` answers "why did this run?" by showing
-`task.created` -> `task.ready  all dependencies complete` -> `task.started` ->
-`task.completed`. Readiness events carry the reason string from the scheduling
-core, so a blocked task names the dependency that blocked it.
-
-`agentctl watch` polls rather than subscribing, because the scheduler usually runs
-in another terminal. The limitation is honest: an event appears within one poll
-interval, and there is no daemon to attach to.
-
-`agentctl stats` derives every figure from stored rows on each call, so a counter
-cannot drift from the rows it claims to count.
-
-### Command execution is restricted, not sandboxed
-Agents can run development commands through one service, which refuses anything
-the operator did not sanction and records everything attempted. In priority order:
-an allowlist of **executables** (matched on the program name only), argument
-arrays with no `shell=True`, a resolved working directory inside the agent's own
-worktree, a timeout with process-tree kill, a capability check, and explicit
-approval for risky argument patterns.
-
-It is deliberately **not** a security sandbox. String matching cannot make
-arbitrary code safe, and pretending otherwise would be worse than useless.
-
-Two details that matter: program names are normalised (`pytest`, `pytest.exe` and
-an absolute path all compare equal, or the allowlist is trivially bypassed on
-Windows), and `denied` beats `allowed`, because listing something in both is a
-mistake and refusing is the safe reading. `run_tests` is a narrower privilege than
-`run_command`, so a reviewer can run the suite without being able to run anything.
-
-### Capabilities are enforced in code, in three layers
-A prompt saying "do not edit files" is guidance. A reviewer without `edit_files`
-is stopped by three independent mechanisms:
-
-1. **Preventive** -- the tools for a missing capability go to the CLI as
-   `--disallowedTools`, so `Edit`, `Write` and `NotebookEdit` are unavailable.
-2. **Validating** -- messages and requested tasks in the response block are
-   refused if the agent lacks `message_agent` / `request_task`.
-3. **Detective** -- git is compared against what the agent was permitted to do,
-   so an edit that somehow got through is still caught and recorded.
-
-A denylist rather than an allowlist for layer 1: enumerating every tool an agent
-may use risks omitting something benign and breaking it, whereas denying the
-specific write and execute tools is precise, and layer 3 catches any gap.
-
-Every refusal is persisted to `denials`, because a refusal that leaves no trace
-cannot be told apart from the action never having been attempted. Defaults are
-per role, so existing projects keep working -- but no role gets `git_merge`, and an
-unrecognised role gets read-only, since guessing that an unknown role may write is
-the wrong way to be wrong.
-
-### Context is layered, not concatenated
-The orchestrator decides what an agent sees, layer by layer:
-
-```
-IDENTITY -> WHAT YOU HAVE LEARNED -> PROJECT FACTS -> OBJECTIVE
-         -> TASK -> HANDOFFS -> INBOX -> NOW
+```bash
+agentctl provider codex       # optional; use `claude` to switch back
+agentctl doctor
 ```
 
-Two invariants hold it together. **No layer grows without bound**: each has a
-character budget, and over budget the least important items are dropped, never
-the most important. **Conversation history is never copied forward**: knowledge
-crosses a session boundary only as a persisted memory or a handoff. There is a
-test asserting `ContextBuilder.build` has no `history`/`transcript` parameter, so
-replay cannot creep back in.
+Review `agentos.yaml`, commit or branch your existing work, and start an
+objective:
 
-`ContextBuilder` is pure, so every budgeting and ordering rule is tested without a
-database. `agentctl context <agent>` prints exactly what would be injected, with
-each layer's size against its budget -- the only practical way to debug a prompt.
-
-### Sessions rotate; knowledge survives
-`context.max_tasks_per_session` and `rotate_on_objective_change` cap how long a
-session lives. On rotation the agent is asked for at most eight short bullets of
-durable facts, those become memories, and only then is the session discarded.
-
-Ordering matters and was got wrong first: rotation must happen **before** the
-prompt is assembled, or the first task of the new session loses the very facts
-rotation just harvested. A test covers it.
-
-### Memory is scoped, and written by Python
-Facts are attached to a project, an agent, an objective or a task, so recall is
-targeted rather than everything ever learned. An agent can state a decision in its
-response block; the orchestrator decides whether to keep it, at what importance,
-and in what scope. Duplicates merge rather than accumulate, and importance only
-ever rises on a repeat.
-
-### Handoffs replace reading someone else's history
-When a task another agent depends on completes, Python builds a small packet --
-summary, interfaces, key files, decisions, warnings -- from facts it already has.
-The receiving agent gets that instead of the sender's conversation, which is what
-makes independent sessions workable. Like messages, a handoff is confirmed only
-after a successful run, so a crash cannot swallow it.
-
-### The TUI is a viewer, not a second orchestrator
-`agentctl dashboard` shows agents, tasks, messages and per-agent output over the
-same services the CLI uses. Widgets only display a `Snapshot` and turn keystrokes
-into selections; there is no orchestration logic in the interface, which also
-means the whole view is testable without starting Textual.
-
-Its reader is deliberately wired to a runtime that raises if asked to run
-anything, so a read-only screen cannot spend usage by accident. Textual is an
-optional dependency (`pip install "agentos[tui]"`) and the command explains that
-if it is missing.
-
-### A gate that passes unwatched is not a gate
-`approvals` in config decides which actions need a human yes. The two that change
-the repository or create work (`manager_plan`, `merge`) default to on;
-`final_completion` defaults to off, because completion is computed from task state
-and a prompt there would be noise.
-
-When a gate is required and nobody can answer, the action is **refused**, not
-assumed, naming the flag that would grant it. Automation is still possible, but
-only by saying so deliberately: pass `--auto-approve` / `--yes`, or turn the gate
-off in config.
-
-`ApprovalService` only answers "is approval required here?" -- it never prompts,
-so the same rules hold for the CLI, a TUI or a non-interactive run.
-
-### Integration detects, it does not guess
-`agentctl integrate` reports by default and merges only with `--apply`. It works
-on a dedicated `integration/...` branch built fresh from the base, so the
-operator's checkout is never modified and abandoning the attempt costs nothing. A
-conflicting merge is aborted, leaving no half-merged files, and the agent's branch
-keeps its work.
-
-Conflict *resolution* is deliberately not automated: a conflict means two agents
-disagreed about the same lines, and picking a winner mechanically is how work gets
-lost. The orchestrator files a task for somebody to decide, with acceptance
-criteria that include not discarding the other branch's changes.
-
-Branches are checked against the base individually, so two that each merge
-cleanly can still conflict with each other once the first lands. Overlapping files
-are flagged up front, and if that sequential conflict does happen the second
-branch gets a resolution task exactly like a predicted one.
-
-### Nothing merges automatically
-`GitManager` can detect a conflict with `merge-tree` without touching the working
-tree, and `merge()` returns a failed result rather than raising, so a caller can
-report the conflict and create a resolution task. The scheduler never calls it.
-
-### Claude proposes, Python applies
-`services/results.py` and `services/planner.py` are the trust boundary. An agent
-asks for messages and follow-up tasks in its response block; a manager proposes a
-plan. Both are validated against the real roster and graph before anything is
-written. An agent cannot name a recipient that does not exist, invent a
-prerequisite, target an ambiguous role, or exceed a per-turn cap, and the manager
-cannot assign work to an agent that is not configured. `validate_plan` is a pure
-function, so every rejection rule is tested without a database.
-
-### delivered is not read
-Message delivery is three-state: `pending`, `delivered` (injected into a prompt
-we actually sent), `read` (the receiving run finished). Marking a message read at
-injection time would lose it whenever a Claude process died mid-run. A failed
-run, a crash, a lost race for the agent or a cancellation all release the
-messages for redelivery.
-
-### One repair attempt, then honesty
-An unparseable reply gets exactly one repair turn whose prompt asks only for the
-response block and forbids further work. If that also fails to parse, the task
-fails -- the orchestrator never records success it cannot verify.
-
-### Objective completion is computed
-An objective is complete when all of its tasks completed, and failed when nothing
-can progress. No agent is ever asked whether the work is done.
-
-### Blockage propagates, reversibly
-A task waiting on a blocked task is itself blocked, so dead work does not look
-like work in flight. `refresh_readiness` iterates to a fixed point because one
-round only moves blockage a single edge down the chain. It reverses automatically
-when the chain clears.
-
-### Scheduling decisions are pure functions
-`services/dag.py` holds readiness, cycle detection and dispatch selection as
-functions over frozen dataclasses -- no database, no asyncio, no Claude. That is
-the part which must be exactly right, so it is testable exhaustively and in
-milliseconds (48 tests, 0.06s). `services/scheduler.py` only loads rows, calls
-those functions, runs agents and persists what they decide.
-
-### Readiness is derived, never assumed
-Statuses are recomputed from the graph on every pass: a dependency that failed or
-was cancelled blocks its dependents; all dependencies complete means ready. A
-task already marked `ready` regresses to `blocked` if a prerequisite later dies,
-and a blocked task recovers if that prerequisite is retried successfully. A
-dangling dependency edge blocks rather than letting the task run.
-
-### Cycles are refused at write time
-`would_create_cycle` runs before an edge is persisted, so a cycle never reaches
-the database. `validate_graph` re-checks the whole graph when the scheduler
-starts, as a safety net against a hand-edited database, and raises rather than
-spinning. Cycle detection is iterative, so a 3000-deep chain does not blow the
-recursion limit.
-
-### The loop does not busy-wait
-Each pass dispatches what it can, then blocks on
-`asyncio.wait(FIRST_COMPLETED)`. When ready work exists but no agent can take it,
-the scheduler stops and says which tasks were skipped instead of polling forever.
-
-### Crash recovery
-Nothing is running when the scheduler starts, so any task still marked `running`
-is stale by definition. It is returned to the queue rather than failed, since the
-work may never have begun, and its retry count is left untouched so a genuine
-crash loop still hits the ceiling.
-
-### Dry run costs nothing
-`runtime/dry_run.py` satisfies the same `AgentRuntime` protocol and launches no
-process, so `agentctl work --dry-run` validates a whole task graph's scheduling
-for free. The scheduler contains no test-only branch.
-
-### Agents: config owns definitions, the database owns state
-`sync_from_config` refreshes an agent's role, description and model from YAML on
-every run, but never touches its `status` or `session_id`. Editing the config
-cannot wipe a live session. Nothing hardcodes the five default roles -- an agent
-with an unknown role gets a neutral brief, so user-defined roles work today.
-
-### Sessions are recovered, not trusted
-A stored session can vanish (cleared history, another machine). The CLI reports
-that as plain text on stdout with exit 1 and no JSON, so `is_stale_session`
-matches on the message and the service starts one fresh session, once, and says
-so. The match is deliberately narrow: a genuine failure is never silently retried.
-
-### Role prompts cannot drift from the parser
-The response-format half of every role prompt is generated from the real
-delimiters and field rules in `schemas/responses.py`. Change the parser and every
-prompt changes with it. The markdown files hold only responsibilities and
-boundaries.
-
-### Additive migrations, not Alembic
-`create_all()` creates missing tables but never alters existing ones, so Phase 2
-adding `agents.runtime` broke every Phase 1 database. `db/migrations.py` checks
-`PRAGMA table_info` and adds missing columns, which is idempotent and preserves
-session IDs and run history. It handles adding a column and nothing else; if a
-drop or type change is ever needed, add Alembic rather than growing that file.
-
-### Synchronous SQLite, on purpose
-The concurrency problem here is subprocesses, not disk I/O. WAL mode lets
-`agentctl status` read while the orchestrator writes. Async callers wrap short DB
-blocks in `asyncio.to_thread`, so connections cross threads: `check_same_thread`
-is disabled, a file database gets one pooled connection per thread, and an
-in-memory one shares a single connection behind a lock.
-
-## Layout
-
+```bash
+agentctl run "Add health checks and document the endpoint"
+agentctl status
+agentctl work
 ```
+
+`run` asks the manager to propose a plan and prompts before creating tasks.
+`work` executes the approved graph. Both operations can invoke paid model
+sessions. To plan, approve, and immediately execute in one command:
+
+```bash
+agentctl run "Add health checks and document the endpoint" --work
+```
+
+Once the tasks settle, inspect what happened before applying anything:
+
+```bash
+agentctl status
+agentctl git status
+agentctl diff backend
+agentctl integrate             # report only
+agentctl integrate --apply     # prompts before merging
+```
+
+For a scheduling-only exercise that launches no agent processes, create tasks
+manually and use `agentctl work --dry-run`.
+
+## Configuration
+
+Each managed repository has an `agentos.yaml` at its root. Configuration is
+validated strictly, so misspelled or unknown keys fail early.
+
+```yaml
+project:
+  name: Example Service
+  description: API and web client
+
+runtime:
+  name: claude                 # claude or codex
+
+orchestrator:
+  max_concurrent_agents: 3
+  default_timeout_seconds: 900
+  max_task_retries: 1
+  manager_role: manager
+
+providers:
+  claude:
+    # planning: <model-name>
+    # execution: <model-name>
+  codex:
+    # planning: <model-name>
+    # execution: <model-name>
+
+agents:
+  manager:
+    role: manager
+    description: Plans and coordinates work; does not implement.
+    tier: planning
+
+  backend:
+    role: backend
+    description: Owns server-side code and data models.
+    worktree: true
+
+  reviewer:
+    role: reviewer
+    description: Reviews completed work against acceptance criteria.
+    worktree: false
+
+verification:
+  backend:
+    commands:
+      - [pytest, -q]
+      - [ruff, check, .]
+  default:
+    commands: []
+
+approvals:
+  manager_plan: true
+  merge: true
+  dangerous_command: true
+  final_completion: false
+
+commands:
+  allowed: [pytest, python, npm, git, ruff, mypy]
+  denied: [powershell, pwsh, cmd, bash, sh, ssh, curl, wget]
+  require_approval: ["git push", "git reset", "git clean"]
+
+context:
+  max_tasks_per_session: 8
+  rotate_on_objective_change: true
+```
+
+### Providers and model tiers
+
+The manager uses the provider's planning tier by default; other agents use its
+execution tier. Override a tier under `providers`, or set `model` on an
+individual agent. `agentctl provider` shows the effective provider and model
+selection, while `agentctl provider claude|codex` changes it for the current
+project without rewriting the YAML file.
+
+Authentication is inherited from the selected CLI's existing login. Prompts and
+repository context are still sent to that provider through its CLI, subject to
+the provider's own terms, privacy controls, and usage charges.
+
+### Agents, roles, and capabilities
+
+Agent names and roles are arbitrary strings. Built-in role briefs exist for the
+starter roster; an unknown role receives a neutral brief, and `prompt` can point
+to a project-specific Markdown file. An agent may also set:
+
+- `worktree: true` for a dedicated `agent/<name>` branch and worktree
+- `tier: planning|execution` to select a provider tier
+- `model: <name>` to pin a model
+- `capabilities: [...]` to replace the defaults for that role
+
+Use `agentctl permissions` to inspect the effective capabilities and
+`agentctl permission denials` to audit refusals.
+
+### Verification
+
+An agent response marked complete first moves to an intermediate state. agentos
+then runs the configured verification commands and only marks the task complete
+when the verdict allows it. Failed verification blocks dependent tasks.
+
+Commands are argument arrays, not shell strings. Acceptance criteria beginning
+with `$`, `cmd:`, `command:`, or `run:` can also become automated checks. Other
+criteria remain visible as manual or review items instead of being treated as
+automatically satisfied.
+
+## Command guide
+
+Run `agentctl --help` or `agentctl <command> --help` for the complete interface.
+
+| Goal | Command |
+|---|---|
+| Initialize or diagnose a project | `agentctl init`, `agentctl doctor` |
+| Plan an objective | `agentctl run "<objective>"` |
+| Execute ready work | `agentctl work` |
+| Exercise scheduling without model calls | `agentctl work --dry-run` |
+| Inspect progress | `agentctl status`, `agentctl dashboard` |
+| Manage the task graph | `agentctl tasks`, `agentctl task ...`, `agentctl replan` |
+| Inspect agents and runs | `agentctl agents`, `agentctl agent ...`, `agentctl logs <agent>` |
+| Send or inspect messages | `agentctl message <agent> "<text>"`, `agentctl messages` |
+| Inspect code changes | `agentctl git status`, `agentctl diff <agent>` |
+| Preview or apply integration | `agentctl integrate`, `agentctl integrate --apply` |
+| Inspect permissions and commands | `agentctl permissions`, `agentctl commands` |
+| Inspect context and memory | `agentctl context <agent>`, `agentctl memories` |
+| Follow events and metrics | `agentctl timeline`, `agentctl watch`, `agentctl stats` |
+| Show or switch providers | `agentctl provider [claude|codex]` |
+
+The Textual dashboard is an operational view over the same services used by the
+CLI. It shows agents, tasks, messages, attention items, recent runs, and change
+summaries. It does not run the scheduler on its own.
+
+## Safety model
+
+agentos is designed to reduce accidental actions and make them observable. It
+is **not a security sandbox** for hostile code or models.
+
+- Model responses are parsed into Pydantic schemas before state changes.
+- Agent text is never interpolated into a shell command.
+- Development commands use argument arrays, a configured executable allowlist,
+  working-directory boundaries, timeouts, and an audit log.
+- Claude tool access is restricted from capabilities. Codex maps write access to
+  its `workspace-write` or `read-only` sandbox because it has no equivalent
+  per-tool allowlist.
+- Worktree diffs are compared with an agent's claimed file list, and
+  unauthorized edits are recorded.
+- Planning and merging require approval by default. Non-interactive runs refuse
+  an unanswered gate instead of assuming consent.
+- `agentctl integrate` only reports unless `--apply` is supplied. Conflicts are
+  not resolved by silently choosing a side.
+
+An allowlist cannot make arbitrary programs safe: `python`, package managers,
+test runners, and Git can all execute project-controlled code. Run agentos only
+on repositories and machines where that risk is acceptable.
+
+## State and Git behavior
+
+- Mutable state lives under `.agentos/`; the SQLite database is the source of
+  truth and uses WAL mode.
+- Agent worktrees live under `worktrees/` and use `agent/<name>` branches.
+- Removing a worktree keeps its branch unless explicitly told otherwise.
+- Integration happens on a dedicated integration branch, leaving the operator's
+  current checkout untouched.
+- If Git isolation is requested but unavailable, execution falls back to the
+  project directory and reports a warning.
+- The first interrupt stops new dispatch and lets active runs settle; a second
+  interrupt cancels them.
+
+## Architecture
+
+```text
 src/agentos/
-  branding.py        product name in one place, so renaming is cheap
-  config.py          YAML + pydantic validation
-  paths.py           project/state layout
-  db/models.py       Agent, Task, TaskDependency, Message, Run
-  db/session.py      engine, WAL, transactional sessions
-  schemas/           enums, response contract, runtime DTOs
-  runtime/base.py    AgentRuntime protocol
-  runtime/claude_cli.py   the only module that spawns processes
-  prompts/           role briefs + generated response contract
-  repositories/      all agent SQL; returns DTOs, never ORM rows
-  services/agents.py agent lifecycle, sessions, state transitions
-  services/dag.py    PURE scheduling logic: readiness, cycles, dispatch order
-  services/tasks.py  task creation, validation, status transitions
-  services/messages.py   the message bus and its delivery lifecycle
-  services/results.py    validates agent responses, applies what is allowed
-  services/planner.py    PURE plan validation + temp-id translation
-  services/objectives.py manager planning, approval gate, completion
-  services/scheduler.py  async dispatch loop over dag.py decisions
-  services/runs.py   run persistence
-  runtime/dry_run.py no-op runtime for free scheduling dry runs
-  vcs/manager.py     the only module that runs git; argv arrays, never a shell
-  services/workspaces.py  where each agent works; verifies claims against git
-  services/integration.py agent branch inspection and conservative merging
-  db/migrations.py   additive column migrations
-  cli/main.py        agentctl
-  cli/glyphs.py      ASCII fallback for legacy Windows consoles
-  services/context.py     PURE context layering with per-layer budgets
-  services/context_service.py  gathers the layers from the database
-  services/memory.py      scoped memory and handoff packets
-  services/rotation.py    PURE session rotation policy
-  schemas/capabilities.py PURE capability model and tool denylist
-  services/permissions.py grants, enforcement and the denial trail
-  services/commands.py    PURE command policy + the only agent-facing spawner
-  services/command_service.py  capability check, run, record
-  services/events.py      the in-process event bus plus persistence
-  services/metrics.py     figures derived from stored rows, never accumulated
-  services/replanner.py   PURE graph-mutation validation + application
-  services/replan_service.py  ask the manager, validate, apply
-  schemas/verification.py PURE criterion classification and verdict logic
-  services/verification.py  runs the checks, records them, decides
-  tui/snapshot.py    everything the dashboard shows, gathered from services
-  tui/app.py         Textual widgets; display only
-tests/
-  fixtures/fake_claude.py   stub CLI: tests run offline and free
+  cli/             Typer commands and Rich output
+  tui/             Textual dashboard
+  runtime/         Claude, Codex, and dry-run adapters
+  services/        orchestration, scheduling, verification, permissions
+  repositories/    persistence interfaces
+  db/              SQLAlchemy models, sessions, and additive migrations
+  schemas/         validated runtime and model-response contracts
+  prompts/         built-in role briefs
+  vcs/             Git worktree, diff, commit, and merge operations
+tests/              offline unit and integration tests with fake CLIs
 ```
 
-## Cost note
+Several boundaries are deliberate:
 
-Each invocation is metered (~$0.02 for a trivial Haiku turn), so concurrency has
-a real bill attached. `max_concurrent_agents` defaults to 3. The test suite never
-calls the real CLI.
+- Runtime adapters are the only code that launches model CLIs.
+- The VCS manager is the only code that invokes Git.
+- Scheduling, graph validation, command policy, and plan validation are kept as
+  pure logic where possible.
+- Events explain what happened; persisted task and objective rows define what is
+  true now.
+- Session history is not copied between agents. Scoped memories, messages, and
+  handoff packets carry durable context.
+
+## Development
+
+Install the development dependencies and run the offline suite:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
+
+The test suite uses fake Claude and Codex executables; it does not require a
+provider login or incur model usage. Useful checks while changing the CLI:
+
+```bash
+agentctl --help
+agentctl doctor
+python -m pytest --collect-only -q
+```
+
+Contributions are welcome. Keep orchestration decisions deterministic, preserve
+the existing trust boundaries, add tests for behavior changes, and avoid tests
+that contact a real provider. Please open an issue before a large architectural
+change so the intended behavior can be agreed on first.
+
+## Known limitations
+
+- The project is pre-1.0 and does not yet publish compatibility guarantees.
+- Installation is from source; there is no PyPI release yet.
+- Cross-platform CI and end-to-end testing against every CLI release are not yet
+  in place.
+- SQLite migrations are additive and intentionally small; complex schema changes
+  would require a dedicated migration framework.
+- Command policy is a guardrail, not a containment boundary.
+- Provider CLI output formats can change and may require adapter updates.
+
+## License
+
+No open-source license has been selected yet. Until a license file is added,
+copyright law reserves the project author's rights; publishing the repository
+alone does not grant permission to use, modify, or redistribute the code.
