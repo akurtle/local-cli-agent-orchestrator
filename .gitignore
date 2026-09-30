@@ -6,6 +6,7 @@ venv/
 .pytest_cache/
 .agentos/
 worktrees/
+benchmarks/output/
 
 # Personal briefing notes
 ORCHESTRATOR_BRIEFING.md
