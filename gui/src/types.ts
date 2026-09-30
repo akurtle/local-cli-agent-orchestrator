@@ -183,3 +183,40 @@ export type Selection =
   | { kind: "attention"; key: string }
   | { kind: "changes"; agent: string }
   | null;
+
+// ------------------------------------------------------------ code review
+
+export interface DiffLine {
+  kind: "context" | "add" | "del";
+  text: string;
+  old: number | null;
+  new: number | null;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  new_start: number;
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface FileDiff {
+  path: string;
+  status: "added" | "deleted" | "modified" | "renamed";
+  old_path: string | null;
+  binary: boolean;
+  too_large: boolean;
+  added: number;
+  removed: number;
+  hunks: DiffHunk[];
+}
+
+export interface Review {
+  agent: string;
+  base: string;
+  branch: string | null;
+  commits: { sha: string; subject: string }[];
+  files: FileDiff[];
+}
+
+export type View = "board" | "code";

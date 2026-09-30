@@ -178,6 +178,69 @@ class GuiState:
             "new_files": untracked,
         }
 
+    def review(self, agent: str) -> dict:
+        """One change source as structured files, for the code review view."""
+        import asyncio
+
+        from agentos.branding import CONFIG_FILENAME
+        from agentos.gui.review import new_file_diff, parse_commits, parse_unified_diff
+        from agentos.tui.changes import SHARED
+
+        paths = self.reader.paths
+        git = self.changes_reader.git
+        if agent == SHARED:
+            where = paths.root
+        else:
+            where = (paths.worktrees_dir / agent).resolve()
+            if not where.is_dir() or where.parent != paths.worktrees_dir.resolve():
+                raise LookupError(f"{agent} has no worktree")
+        entry = next((c for c in self.changes if c.agent == agent), None)
+        base = entry.base if entry else "HEAD"
+
+        # The orchestrator's own files are not the agents' work.
+        ours = tuple(
+            f"{p.relative_to(paths.root).as_posix()}/"
+            for p in (paths.worktrees_dir, paths.state_dir)
+        )
+
+        def mine(path: str) -> bool:
+            normal = path.replace("\\", "/")
+            return not (agent == SHARED and (normal.startswith(ours) or normal == CONFIG_FILENAME))
+
+        async def gather() -> tuple[str, str, str]:
+            fork = await git._run("merge-base", base, "HEAD", cwd=where, check=False)
+            start = fork.text if fork.ok and fork.text else "HEAD"
+            diff = await git._run(
+                "diff", "--no-color", "--find-renames", "-U3", start, cwd=where, check=False
+            )
+            untracked = await git._run(
+                "ls-files", "--others", "--exclude-standard", cwd=where, check=False
+            )
+            log = ""
+            if agent != SHARED:
+                commits = await git._run(
+                    "log", "--format=%h%x09%s", "-n", "50", f"{base}..HEAD",
+                    cwd=where, check=False,
+                )
+                log = commits.stdout
+            return diff.stdout, untracked.stdout, log
+
+        diff_text, untracked_text, log_text = asyncio.run(gather())
+        files = [f for f in parse_unified_diff(diff_text) if mine(f.path)]
+        files += [
+            new_file_diff(where, rel)
+            for rel in untracked_text.splitlines()
+            if rel.strip() and mine(rel)
+        ]
+        files.sort(key=lambda f: f.path)
+        return {
+            "agent": agent,
+            "base": base,
+            "branch": entry.branch if entry else None,
+            "commits": parse_commits(log_text),
+            "files": to_json(files),
+        }
+
 
 # ------------------------------------------------------------------- routing
 
@@ -205,9 +268,9 @@ def handle_api(state: GuiState, method: str, path: str, body: dict) -> Any:
             return state.snapshot()
         if parts == ["work", "log"]:
             return state.work_log()
-        if len(parts) == 2 and parts[0] == "diff":
+        if len(parts) == 2 and parts[0] in ("diff", "review"):
             try:
-                return state.diff(parts[1])
+                return state.diff(parts[1]) if parts[0] == "diff" else state.review(parts[1])
             except LookupError as exc:
                 raise ApiError(HTTPStatus.NOT_FOUND, str(exc)) from exc
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such endpoint: {path}")

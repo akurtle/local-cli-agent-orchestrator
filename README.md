@@ -31,6 +31,9 @@ process lifecycle, verification, and Git isolation.
 - **Retain operator control.** Plans, risky commands, and merges can require
   explicit approval. Integration is a report-only operation unless `--apply` is
   provided.
+- **Operate visually when useful.** The local web dashboard shows the task
+  board, agents, blockers, diffs, messages, and live work output without moving
+  orchestration state out of the project.
 - **Keep an audit trail.** SQLite stores tasks, runs, messages, denials,
   verification results, and events locally under `.agentos/`.
 
@@ -125,6 +128,13 @@ objective:
 agentctl run "Add health checks and document the endpoint"
 agentctl status
 agentctl work
+```
+
+To monitor and control the run in a browser instead, open the local web
+dashboard from the managed project:
+
+```bash
+agentctl gui
 ```
 
 `run` asks the manager to propose a plan and prompts before creating tasks.
@@ -279,12 +289,41 @@ summaries. It does not run the scheduler on its own.
 
 ### Web dashboard
 
-`agentctl gui` opens the same dashboard as a local web app: a board of tasks
-moving through lanes, a "needs you" row, agents, per-agent changes with full
-diffs, messages and the live work log, plus the same actions as the terminal
-dashboard (start/stop work, unblock, retry, block, cancel, pause, switch
-provider). It listens on 127.0.0.1 only and every API call needs the random
-token in the link it opens.
+Run `agentctl gui` from a managed project to open its local web dashboard. Use
+`--no-browser` to print the link without opening it, or `--port <number>` to
+choose a different loopback port.
+
+```bash
+agentctl gui
+agentctl gui --no-browser
+agentctl gui --port 9000
+```
+
+The GUI refreshes project state every two seconds and provides:
+
+- a task board with Waiting, Running, Checking, Stuck, and Done lanes, plus
+  objective filtering and an optional Cancelled lane;
+- a focused **Needs you** area that shows the root blocker, refused agent CLI
+  calls, and downstream tasks it is holding up;
+- task and agent detail drawers with dependency, acceptance-criteria, recent-run,
+  and status information;
+- confirmed controls to start or stop work, unblock, retry, block, or cancel a
+  task, pause or resume an agent, and choose the provider for the next run;
+- per-agent and shared-worktree change summaries with full diffs, agent
+  messages, and a live work log.
+
+Starting work from the GUI is the same operation as `agentctl work` and can use
+paid model usage. It runs in a separate process, so closing the browser tab does
+not stop it. Plan creation, plan approval, and integration remain explicit CLI
+workflows; when an attention item needs one, the GUI shows a copyable terminal
+command.
+
+The server binds only to `127.0.0.1`. Each launch creates a random token in the
+opened link; the browser removes it from the address, keeps it for that tab's
+session, and sends it with every API request. Restart `agentctl gui` to issue a
+new link and token.
+
+#### Developing the GUI
 
 The frontend is React in `gui/`; its build is served from
 `src/agentos/gui/static`. After changing it:
@@ -338,6 +377,7 @@ on repositories and machines where that risk is acceptable.
 src/agentos/
   cli/             Typer commands and Rich output
   tui/             Textual dashboard
+  gui/             loopback web server and bundled React dashboard
   runtime/         Claude, Codex, and dry-run adapters
   services/        orchestration, scheduling, verification, permissions
   repositories/    persistence interfaces

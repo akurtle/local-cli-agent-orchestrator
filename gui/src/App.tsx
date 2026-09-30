@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, captureToken } from "./api";
-import type { Selection, Snapshot } from "./types";
+import type { Selection, Snapshot, View } from "./types";
 import { TopBar } from "./components/TopBar";
 import { NeedsYou } from "./components/NeedsYou";
 import { AgentRow } from "./components/AgentRow";
@@ -9,6 +9,7 @@ import { Drawer } from "./components/Drawer";
 import { BottomTabs } from "./components/BottomTabs";
 import { ConfirmDialog, type Confirmation } from "./components/ConfirmDialog";
 import { Toasts, type Toast } from "./components/Toasts";
+import { CodeReview } from "./components/review/CodeReview";
 
 const REFRESH_MS = 2000;
 
@@ -18,6 +19,8 @@ export interface Actions {
   /** POST without asking (only for harmless, reversible moves). */
   run: (path: string, done: string, body?: unknown) => Promise<void>;
   select: (s: Selection) => void;
+  /** Switch to the code view, showing one change source. */
+  openReview: (agent: string) => void;
 }
 
 export default function App() {
@@ -25,6 +28,8 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [expired, setExpired] = useState(!captureToken());
   const [selection, setSelection] = useState<Selection>(null);
+  const [view, setView] = useState<View>(() => (window.location.hash.includes("code") ? "code" : "board"));
+  const [reviewSource, setReviewSource] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastId = useRef(0);
@@ -70,6 +75,11 @@ export default function App() {
     () => ({
       run,
       select: setSelection,
+      openReview: (agent: string) => {
+        setReviewSource(agent);
+        setView("code");
+        setSelection(null);
+      },
       confirm: ({ path, payload, done, ...question }) =>
         setConfirmation({ ...question, onConfirm: () => run(path, done, payload) }),
     }),
@@ -99,18 +109,24 @@ export default function App() {
 
   return (
     <div className={`shell ${selection ? "with-drawer" : ""}`}>
-      <TopBar snapshot={snapshot} actions={actions} />
+      <TopBar snapshot={snapshot} actions={actions} view={view} onView={setView} />
       {offline && (
         <p className="banner" role="status">
           Lost contact with <code>agentctl gui</code>. Showing the last known state.
         </p>
       )}
-      <main className="main">
-        <NeedsYou items={snapshot.attention} selection={selection} actions={actions} />
-        <AgentRow snapshot={snapshot} selection={selection} actions={actions} />
-        <Board snapshot={snapshot} selection={selection} actions={actions} />
-        <BottomTabs snapshot={snapshot} selection={selection} actions={actions} />
-      </main>
+      {view === "board" ? (
+        <main className="main">
+          <NeedsYou items={snapshot.attention} selection={selection} actions={actions} />
+          <AgentRow snapshot={snapshot} selection={selection} actions={actions} />
+          <Board snapshot={snapshot} selection={selection} actions={actions} />
+          <BottomTabs snapshot={snapshot} selection={selection} actions={actions} />
+        </main>
+      ) : (
+        <main className="main main-code">
+          <CodeReview snapshot={snapshot} source={reviewSource} onSource={setReviewSource} actions={actions} />
+        </main>
+      )}
       {selection && (
         <Drawer
           snapshot={snapshot}

@@ -1,0 +1,590 @@
+/* The code view: a summary of the whole change, then a VS Code-style
+   diff editor (file tree on the left, the diff on the right). */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:root {
+  --code-bg: #ffffff;
+  --code-add: #e3f4e8;
+  --code-add-mark: #b7e2c3;
+  --code-del: #fbe7e5;
+  --code-del-mark: #f1bdb7;
+  --seg-0: #24477e;
+  --seg-1: #3f8aa6;
+  --seg-2: #7a55c7;
+  --seg-3: #b0892f;
+  --seg-4: #5b7a3a;
+  --seg-5: #8792a2;
+  --syn-keyword: #7a3eb1;
+  --syn-string: #1d7a4a;
+  --syn-comment: #6f7986;
+  --syn-number: #a0521d;
+  --syn-title: #1f55b0;
+  --syn-attr: #8a5a00;
+  --syn-type: #0f7a86;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --code-bg: #1b222c;
+    --code-add: #1c3527;
+    --code-add-mark: #2d5a3f;
+    --code-del: #3d2224;
+    --code-del-mark: #6a3134;
+    --seg-0: #7aa2e8;
+    --seg-1: #5fb3cf;
+    --seg-2: #a88ae6;
+    --seg-3: #d9b25a;
+    --seg-4: #8fb86a;
+    --seg-5: #8b96a6;
+    --syn-keyword: #c49bf2;
+    --syn-string: #8fd4a6;
+    --syn-comment: #8a95a4;
+    --syn-number: #f0a36e;
+    --syn-title: #8fb6f5;
+    --syn-attr: #e0bb6a;
+    --syn-type: #6fd0da;
+  }
+}
+
+/* ------------------------------------------------ view switch (top bar) */
+
+.views {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--lane);
+  border-radius: 6px;
+}
+
+.views button {
+  border: 0;
+  background: none;
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+
+.views button[aria-current="page"] {
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 15%, transparent);
+}
+
+.view-count {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+  font-weight: 400;
+}
+
+.main-code {
+  max-width: none;
+}
+
+.review {
+  display: grid;
+  gap: 16px;
+}
+
+.empty-review {
+  padding: 32px;
+  background: var(--paper);
+  border-radius: 6px;
+}
+
+.empty-review h2 {
+  margin-bottom: 8px;
+}
+
+/* ---------------------------------------------------------------- summary */
+
+.review-summary {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 18px 20px;
+  display: grid;
+  gap: 16px;
+}
+
+.summary-top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px 24px;
+}
+
+.summary-top h2 {
+  font-size: var(--step-1);
+  margin-bottom: 2px;
+}
+
+.summary-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 36px;
+  margin: 0;
+}
+
+.summary-stats div {
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.summary-stats dt {
+  font-size: var(--step--1);
+  color: var(--ink-soft);
+}
+
+.summary-stats dd {
+  margin: 0;
+  font-size: var(--step-2);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-kinds dd {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 2.1rem;
+  font-size: var(--step-0);
+  font-weight: 400;
+}
+
+.summary-areas {
+  display: grid;
+  gap: 8px;
+}
+
+.area-strip {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.area-seg {
+  flex-basis: 0;
+  min-width: 4px;
+}
+
+.seg-0 { background: var(--seg-0); }
+.seg-1 { background: var(--seg-1); }
+.seg-2 { background: var(--seg-2); }
+.seg-3 { background: var(--seg-3); }
+.seg-4 { background: var(--seg-4); }
+.seg-5 { background: var(--seg-5); }
+
+.summary-areas ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+}
+
+.summary-areas li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.summary-narrative {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px 32px;
+  border-top: 1px solid var(--rule);
+  padding-top: 14px;
+}
+
+.summary-narrative h3 {
+  font-size: var(--step-0);
+  margin-bottom: 8px;
+}
+
+.said + .said {
+  margin-top: 10px;
+}
+
+.commits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.commits .mono {
+  color: var(--ink-faint);
+  margin-right: 6px;
+}
+
+/* ---------------------------------------------------------- tree + diff */
+
+.review-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 290px) minmax(0, 1fr);
+  height: 78vh;
+  min-height: 420px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.file-tree {
+  overflow-y: auto;
+  padding: 8px 0;
+  border-right: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--lane) 45%, var(--paper));
+}
+
+.tree-folder + .tree-folder {
+  margin-top: 6px;
+}
+
+/* Long folder paths keep their end (the part that tells folders apart). */
+.tree-folder-name {
+  margin: 0;
+  padding: 4px 12px;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.file-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tree-file {
+  display: grid;
+  grid-template-columns: 1.2em minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 4px 12px 4px 18px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tree-file:hover {
+  background: color-mix(in srgb, var(--action) 8%, transparent);
+}
+
+.tree-file.selected {
+  background: color-mix(in srgb, var(--action) 16%, transparent);
+  box-shadow: inset 3px 0 0 var(--action);
+}
+
+.status-letter {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: var(--step--1);
+  text-align: center;
+}
+
+.s-modified { color: var(--needs); }
+.s-added { color: var(--done); }
+.s-deleted { color: var(--failed); }
+.s-renamed { color: var(--running); }
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-name.struck {
+  text-decoration: line-through;
+  color: var(--ink-soft);
+}
+
+.tree-counts {
+  display: flex;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+}
+
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.diff-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.diff-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.diff-path {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.diff-counts {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  white-space: nowrap;
+}
+
+.diff-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.segmented button {
+  border: 0;
+  background: none;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: var(--step--1);
+  color: var(--ink-soft);
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--rule);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--action);
+  color: var(--action-ink);
+}
+
+.file-position {
+  font-size: var(--step--1);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-scroll {
+  flex: 1;
+  overflow: auto;
+  background: var(--code-bg);
+}
+
+.pane-note {
+  padding: 24px;
+  color: var(--ink-soft);
+}
+
+.hunk + .hunk {
+  border-top: 1px solid var(--rule);
+}
+
+.hunk-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  gap: 14px;
+  padding: 4px 12px;
+  font-size: var(--step--1);
+  color: var(--checking);
+  background: color-mix(in srgb, var(--checking) 10%, var(--code-bg));
+}
+
+.hunk-context {
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rows {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  line-height: 1.6;
+}
+
+.row {
+  display: grid;
+}
+
+.split-rows .row {
+  grid-template-columns: 3.6em minmax(0, 1fr) 3.6em minmax(0, 1fr);
+}
+
+.inline-rows .row {
+  grid-template-columns: 3.6em 3.6em 1.4em minmax(0, 1fr);
+}
+
+.ln {
+  padding-right: 10px;
+  text-align: right;
+  color: var(--ink-faint);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The seam between the old and new sides. */
+.split-rows .row > .ln:nth-child(3) {
+  border-left: 1px solid var(--rule);
+}
+
+.sign {
+  color: var(--ink-faint);
+  user-select: none;
+}
+
+.code {
+  padding-right: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+
+.code.k-add,
+.ln.k-add,
+.inline-rows .row.k-add > * {
+  background: var(--code-add);
+}
+
+.code.k-del,
+.ln.k-del,
+.inline-rows .row.k-del > * {
+  background: var(--code-del);
+}
+
+.inline-rows .row.k-add .sign {
+  color: var(--plus);
+}
+
+.inline-rows .row.k-del .sign {
+  color: var(--minus);
+}
+
+.code.k-add mark {
+  background: var(--code-add-mark);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.code.k-del mark {
+  background: var(--code-del-mark);
+  color: inherit;
+  border-radius: 2px;
+}
+
+/* Where one side has no line, hatch it, as VS Code does. */
+.code.empty,
+.ln.filler {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 5px,
+    color-mix(in srgb, var(--rule) 55%, transparent) 5px 6px
+  );
+}
+
+/* ------------------------------------------------------- syntax colours */
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal {
+  color: var(--syn-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-template-string {
+  color: var(--syn-string);
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.hljs-number,
+.hljs-symbol {
+  color: var(--syn-number);
+}
+.hljs-title,
+.hljs-section {
+  color: var(--syn-title);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-class,
+.hljs-variable {
+  color: var(--syn-attr);
+}
+.hljs-type,
+.hljs-built_in,
+.hljs-title.class_,
+.hljs-name,
+.hljs-tag {
+  color: var(--syn-type);
+}
+
+/* ------------------------------------------------------------- narrow */
+
+@media (max-width: 900px) {
+  .review-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: auto;
+  }
+  .file-tree {
+    max-height: 30vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .diff-scroll {
+    max-height: 70vh;
+  }
+  .split-rows .row {
+    grid-template-columns: 2.8em minmax(0, 1fr) 2.8em minmax(0, 1fr);
+  }
+}

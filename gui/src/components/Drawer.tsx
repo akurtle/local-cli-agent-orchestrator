@@ -407,6 +407,12 @@ function ChangesDetail({ entry, snapshot, actions }: { entry: AgentChanges; snap
         </section>
       )}
 
+      <div className="button-row">
+        <button className="button primary" onClick={() => actions.openReview(entry.agent)}>
+          Review the code
+        </button>
+      </div>
+
       <section className="block">
         {showDiff ? (
           <DiffView agent={entry.agent} />

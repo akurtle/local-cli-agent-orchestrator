@@ -254,3 +254,10 @@ def test_running_task_is_protected(gui) -> None:
     tasks.transition(busy.key, TaskStatus.RUNNING)
     status, data, _h = request(server, "POST", f"/api/tasks/{busy.key}/cancel", token=state.token)
     assert status == 409 and "is running" in data["error"]
+
+
+def test_review_endpoint_needs_the_token_and_a_real_source(gui) -> None:
+    state, server, _tasks, _static = gui
+    assert request(server, "GET", "/api/review/backend")[0] == 401
+    for name in ("..", "nobody"):
+        assert request(server, "GET", f"/api/review/{name}", token=state.token)[0] == 404

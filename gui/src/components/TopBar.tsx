@@ -1,8 +1,18 @@
 import { useState } from "react";
 import type { Actions } from "../App";
-import type { Snapshot } from "../types";
+import type { Snapshot, View } from "../types";
 
-export function TopBar({ snapshot, actions }: { snapshot: Snapshot; actions: Actions }) {
+export function TopBar({
+  snapshot,
+  actions,
+  view,
+  onView,
+}: {
+  snapshot: Snapshot;
+  actions: Actions;
+  view: View;
+  onView: (v: View) => void;
+}) {
   const [choosing, setChoosing] = useState(false);
   const { counts, provider, work } = snapshot;
   const objective = [...snapshot.objectives].reverse().find((o) => !["completed", "failed", "cancelled"].includes(o.status))
@@ -56,6 +66,20 @@ export function TopBar({ snapshot, actions }: { snapshot: Snapshot; actions: Act
           </p>
         )}
       </div>
+
+      <nav className="views" aria-label="Views">
+        <button aria-current={view === "board" ? "page" : undefined} onClick={() => onView("board")}>
+          Board
+        </button>
+        <button aria-current={view === "code" ? "page" : undefined} onClick={() => onView("code")}>
+          Code changes
+          {snapshot.changes.length > 0 && (
+            <span className="view-count">
+              {snapshot.changes.reduce((n, c) => n + c.files.length, 0)}
+            </span>
+          )}
+        </button>
+      </nav>
 
       <dl className="tally">
         <div>

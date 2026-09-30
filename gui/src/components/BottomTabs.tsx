@@ -59,6 +59,9 @@ function ChangesList({ snapshot, selection, actions }: { snapshot: Snapshot; sel
           <th scope="col">Lines</th>
           <th scope="col">Files</th>
           <th scope="col">Mostly in</th>
+          <th scope="col">
+            <span className="visually-hidden">Review</span>
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -76,6 +79,11 @@ function ChangesList({ snapshot, selection, actions }: { snapshot: Snapshot; sel
               </td>
               <td>{c.files.length}</td>
               <td className="mono">{c.areas.slice(0, 2).map((a) => a.path).join(", ")}</td>
+              <td>
+                <button className="button quiet small" onClick={() => actions.openReview(c.agent)}>
+                  Review the code
+                </button>
+              </td>
             </tr>
           );
         })}
