@@ -28,7 +28,7 @@
       "evaluation_steps": [
         {
           "name": "pytest",
-          "command": ["python", "-m", "pytest", "-q"]
+          "command": ["python", "-m", "pytest", "-q", "--import-mode=importlib"]
         }
       ]
     }
@@ -75,6 +75,9 @@
         },
         {
           "name": "plan and execute",
+          "env": {
+            "AGENTOS_PRESERVE_OUTPUT_TAIL": "1"
+          },
           "command": [
             "agentctl",
             "run",
