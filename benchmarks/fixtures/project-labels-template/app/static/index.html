@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Project Tracker</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">AGENTOS BENCHMARK</p>
+        <h1>Project Tracker</h1>
+        <p>Create a few projects and keep the work visible.</p>
+      </header>
+
+      <form id="project-form">
+        <label>
+          Project name
+          <input id="name" maxlength="80" required />
+        </label>
+        <label>
+          Description
+          <textarea id="description" maxlength="500"></textarea>
+        </label>
+        <button type="submit">Add project</button>
+      </form>
+
+      <section>
+        <h2>Projects</h2>
+        <div id="projects" class="project-grid"></div>
+        <p id="empty">No projects yet.</p>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

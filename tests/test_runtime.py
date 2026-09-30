@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from agentos.runtime.base import RuntimeNotAvailable
-from agentos.runtime.claude_cli import ClaudeRunner, resolve_executable
+from agentos.runtime.claude_cli import (
+    PRESERVE_OUTPUT_TAIL_ENV,
+    ClaudeRunner,
+    _truncate_stdout,
+    resolve_executable,
+)
 from agentos.schemas.enums import RunStatus
 from agentos.schemas.runtime import RunRequest
 
@@ -86,6 +91,23 @@ def test_parse_event_line_non_object_becomes_parse_error() -> None:
     event = ClaudeRunner.parse_event_line("[1, 2, 3]")
     assert event is not None
     assert event.type == "parse_error"
+
+
+def test_stdout_truncation_keeps_head_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(PRESERVE_OUTPUT_TAIL_ENV, raising=False)
+    captured = _truncate_stdout("BEGIN-0123456789-END", limit=10)
+    assert captured.startswith("BEGIN-0123")
+    assert not captured.endswith("-END")
+
+
+def test_stdout_truncation_can_preserve_tail_for_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PRESERVE_OUTPUT_TAIL_ENV, "1")
+    captured = _truncate_stdout("BEGIN-0123456789-END", limit=10)
+    assert "tail retained" in captured
+    assert captured.endswith("456789-END")
+    assert not captured.startswith("BEGIN")
 
 
 # ----------------------------------------------------------------- execution

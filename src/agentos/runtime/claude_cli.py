@@ -36,6 +36,12 @@ from agentos.schemas.runtime import RunRequest, RunResult, StreamEvent
 # Cap retained output so one chatty agent cannot bloat the database.
 MAX_CAPTURED_CHARS = 2_000_000
 
+# Opt-in escape hatch for diagnostics and benchmark accounting. Claude's
+# stream-json usage totals are emitted in the terminal result event, so keeping
+# only the beginning of a very large stream can discard the record needed to
+# report tokens. Normal runs retain the existing head-first behavior.
+PRESERVE_OUTPUT_TAIL_ENV = "AGENTOS_PRESERVE_OUTPUT_TAIL"
+
 # Emitted by the CLI when --resume names a conversation it cannot find. Verified
 # against claude 2.1.x, which prints this as plain text and exits 1 without any
 # JSON, so it cannot be detected structurally.
@@ -53,6 +59,21 @@ def _truncate(text: str, limit: int = MAX_CAPTURED_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _truncate_stdout(text: str, limit: int = MAX_CAPTURED_CHARS) -> str:
+    """Bound stdout, optionally retaining terminal usage events instead."""
+    if len(text) <= limit:
+        return text
+    if os.environ.get(PRESERVE_OUTPUT_TAIL_ENV, "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return _truncate(text, limit)
+    omitted = len(text) - limit
+    return f"...[truncated first {omitted} chars; tail retained]\n" + text[-limit:]
 
 
 def resolve_executable(explicit: str | None = None) -> str:
@@ -454,7 +475,7 @@ class ClaudeRunner:
             session_id=session_id,
             exit_code=exit_code,
             text=_truncate(str(text)),
-            stdout=_truncate("".join(stdout_chunks)),
+            stdout=_truncate_stdout("".join(stdout_chunks)),
             stderr=_truncate(stderr_text),
             command=argv,
             events=events,
