@@ -36,6 +36,12 @@ project, update:
 same model used by the direct Claude workflow. Change all three model entries
 together when testing another model.
 
+The example enables `AGENTOS_PRESERVE_OUTPUT_TAIL=1` only for the AgentOS
+execution step. Normal AgentOS runs keep the beginning of oversized provider
+output; this opt-in benchmark mode keeps the end instead so Claude's terminal
+stream event remains available for token accounting. Enable it manually only
+for targeted diagnostic runs that require usage capture.
+
 Commands are JSON argument arrays and are executed without a shell. Available
 placeholders include `{workspace}`, `{prompt}`, `{prompt_file}`, `{task_id}`,
 `{attempt}`, `{base_ref}`, `{base_commit}`, `{config_dir}`, `{benchmark_root}`,
