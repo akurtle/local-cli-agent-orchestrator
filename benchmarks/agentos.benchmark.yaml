@@ -1,0 +1,47 @@
+project:
+  name: Benchmark
+  description: Repeatable agentos benchmark run.
+
+runtime:
+  name: claude
+
+providers:
+  claude:
+    # Use the same model as the direct-CLI workflow.
+    planning: claude-sonnet-5
+    execution: claude-sonnet-5
+
+orchestrator:
+  max_concurrent_agents: 3
+  default_timeout_seconds: 900
+  max_task_retries: 1
+
+agents:
+  manager:
+    role: manager
+    description: Plans and coordinates work; does not implement.
+  backend:
+    role: backend
+    description: Owns server-side code and data models.
+  frontend:
+    role: frontend
+    description: Owns UI and client-side code.
+  qa:
+    role: qa
+    description: Tests the implementation and reports failures.
+  reviewer:
+    role: reviewer
+    description: Reviews work against its acceptance criteria.
+
+verification:
+  default:
+    commands: []
+
+approvals:
+  manager_plan: false
+  merge: false
+  final_completion: false
+
+context:
+  max_tasks_per_session: 8
+  rotate_on_objective_change: true
