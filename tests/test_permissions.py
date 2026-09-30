@@ -416,8 +416,65 @@ def test_denied_program_is_never_pre_approved() -> None:
         {
             "project": {"name": "x"},
             "agents": {"backend": {"role": "backend"}},
-            "commands": {"allowed": ["npm", "bash"], "denied": ["bash"]},
+            "commands": {"allowed": ["npm", "bash"], "denied": ["bash"], "helpers": []},
         }
     )
     tools = shell_allowed_tools(config, frozenset({Capability.RUN_COMMAND}))
     assert tools == ["Bash(npm:*)", "PowerShell(npm:*)"]
+
+
+def test_helpers_survive_a_custom_allow_list() -> None:
+    """A project listing its own programs still gets grep/tail for pipelines."""
+    from agentos.services.agents import shell_allowed_tools
+
+    config = Config.model_validate(
+        {
+            "project": {"name": "x"},
+            "agents": {"qa": {"role": "qa"}},
+            "commands": {"allowed": ["npm"], "denied": ["cat"]},
+        }
+    )
+    tools = shell_allowed_tools(config, frozenset({Capability.RUN_COMMAND}))
+    assert "Bash(npm:*)" in tools
+    assert "Bash(grep:*)" in tools and "PowerShell(tail:*)" in tools
+    # The deny list still wins over a helper.
+    assert "Bash(cat:*)" not in tools
+    # Helpers come from config, so a project can trim them.
+    assert tools.count("Bash(npm:*)") == 1
+
+
+async def test_skill_tool_is_always_allowed(db, config, tmp_path) -> None:
+    """Loading a skill runs nothing; what it then asks for is still checked."""
+    runtime = StubRuntime()
+    service = AgentService(db, config, runtime, tmp_path)
+    service.sync_from_config()
+    await service.run_agent("reviewer", "review it")
+    assert "Skill" in runtime.requests[0].allowed_tools
+
+
+def test_claude_may_read_its_own_temp_dir() -> None:
+    from agentos.runtime.claude_cli import ClaudeRunner, claude_temp_dir
+
+    class FakeRunner(ClaudeRunner):
+        @property
+        def executable(self) -> str:
+            return "claude"
+
+    argv, _ = FakeRunner().build_command(RunRequest(prompt="x"))
+    index = argv.index("--add-dir")
+    assert argv[index + 1] == claude_temp_dir()
+    assert argv[index + 1].endswith("claude")
+    assert "~" not in argv[index + 1]
+
+
+def test_temp_is_handed_over_in_long_form(monkeypatch, tmp_path) -> None:
+    """Claude only matches its directory allowance against the long spelling."""
+    from agentos.runtime.claude_cli import ClaudeRunner
+
+    roundabout = tmp_path / "a" / ".." / "b"
+    (tmp_path / "b").mkdir()
+    monkeypatch.setenv("TEMP", str(roundabout))
+    monkeypatch.setenv("TMP", str(roundabout))
+    env = ClaudeRunner()._child_env()
+    assert env["TEMP"] == str((tmp_path / "b").resolve())
+    assert env["TMP"] == env["TEMP"]

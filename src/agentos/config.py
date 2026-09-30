@@ -176,6 +176,15 @@ class CommandsSection(BaseModel):
             "npm publish", "pnpm publish",
         ]
     )
+    helpers: list[str] = Field(
+        default_factory=lambda: [
+            "echo", "ls", "cat", "head", "tail", "grep", "wc", "sort", "uniq",
+            "pwd", "which", "diff", "true",
+        ]
+    )
+    """Read-only utilities agents pipe commands through (`npm test | tail`).
+    Kept apart from `allowed` so a project that lists its own programs does not
+    lose them; a pipeline is only approved if every command in it is."""
     timeout_seconds: float = Field(default=300.0, gt=0)
 
 

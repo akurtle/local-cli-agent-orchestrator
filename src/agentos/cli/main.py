@@ -120,6 +120,48 @@ def dashboard() -> None:
         ctx.db.dispose()
 
 
+@app.command("gui")
+def gui(
+    port: Annotated[
+        int, typer.Option("--port", help="Port on 127.0.0.1; 0 picks a free one.")
+    ] = 8765,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Print the link instead of opening it.")
+    ] = False,
+) -> None:
+    """Open the dashboard as a local web app (127.0.0.1 only)."""
+    import webbrowser
+
+    from agentos.gui.server import GuiState, create_server, url_for
+    from agentos.tui.snapshot import SnapshotReader
+
+    ctx = load_context()
+    state = GuiState(SnapshotReader(ctx.db, ctx.config, ctx.paths))
+    try:
+        server = create_server(state, port)
+    except OSError:
+        # The usual port is taken (maybe another project's gui); take any.
+        server = create_server(state, 0)
+    state.start_scanning()
+    url = url_for(server, state)
+    console.print(f"[bold]agentos gui[/] for {ctx.config.project.name}")
+    console.print(f"  {url}")
+    console.print(
+        "[dim]Local only. The link holds this session's access token; don't share it. "
+        "Ctrl+C to stop the server (a running `work` keeps going).[/]"
+    )
+    if not no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        state.stop()
+        server.server_close()
+        ctx.db.dispose()
+
+
 @app.command("context")
 def context(
     agent: Annotated[str, typer.Argument(help="Agent name.")],

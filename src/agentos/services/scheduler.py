@@ -105,6 +105,7 @@ class Scheduler:
         event_bus: EventBus | None = None,
         verification_service: VerificationService | None = None,
         on_progress: Callable[[str, str], None] | None = None,
+        stop_check: Callable[[], bool] | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -123,6 +124,9 @@ class Scheduler:
             db, config, task_service, self.memory
         )
         self.on_progress = on_progress
+        # Polled before each pass, for a stop asked for from another process
+        # (the dashboard). Same effect as request_stop().
+        self.stop_check = stop_check
         self._stopping = False
 
     # ------------------------------------------------------------------ helpers
@@ -138,6 +142,14 @@ class Scheduler:
     def request_stop(self) -> None:
         """Stop launching new work; let running tasks finish."""
         self._stopping = True
+
+    def _stop_asked(self) -> bool:
+        if self.stop_check is None:
+            return False
+        try:
+            return bool(self.stop_check())
+        except Exception:  # a broken check must not stop real work
+            return False
 
     def available_agents(self) -> set[str]:
         """Agents that could take a task right now."""
@@ -679,6 +691,12 @@ class Scheduler:
         try:
             while passes < max_passes:
                 passes += 1
+                if not self._stopping and self._stop_asked():
+                    self.request_stop()
+                    self._notify(
+                        SchedulerEvent.STOP,
+                        "stop requested: finishing running tasks, starting nothing new",
+                    )
                 await asyncio.to_thread(self.tasks.refresh_readiness)
                 nodes = await asyncio.to_thread(self.tasks.tasks.nodes)
 

@@ -6,3 +6,7 @@ venv/
 .pytest_cache/
 .agentos/
 worktrees/
+
+# Personal briefing notes
+ORCHESTRATOR_BRIEFING.md
+.gstack/

@@ -32,6 +32,7 @@ from textual.worker import get_current_worker
 
 from agentos.repositories.tasks import TaskNotFound
 from agentos.schemas.enums import AgentStatus, TaskStatus
+from agentos.services.agents import AgentBusy
 from agentos.services.tasks import InvalidTaskTransition
 from agentos.tui.attention import (
     KIND_STYLE,
@@ -109,6 +110,10 @@ def summary_line(snapshot: Snapshot) -> str:
         parts.append(f"[yellow]{len(snapshot.blocked)} blocked[/]")
     if snapshot.attention:
         parts.append(f"[bold yellow]{len(snapshot.attention)} need you[/]")
+    if snapshot.work == "running":
+        parts.append("[bold green]work running[/]")
+    elif snapshot.work == "stopping":
+        parts.append("[yellow]work stopping[/]")
     return "   ".join(parts)
 
 
@@ -526,6 +531,9 @@ class DashboardApp(App):
         Binding("u", "unblock", "Unblock"),
         Binding("R", "retry", "Retry"),
         Binding("p", "provider", "Provider"),
+        Binding("w", "work", "Work"),
+        Binding("b", "block", "Block"),
+        Binding("s", "stop", "Stop"),
     ]
 
     snapshot: reactive[Snapshot | None] = reactive(None)
@@ -808,3 +816,106 @@ class DashboardApp(App):
             self.refresh_snapshot()
 
         self.push_screen(ProviderScreen(providers), chosen)
+
+    # ------------------------------------------------------------------ work
+
+    def action_work(self) -> None:
+        """Start `agentctl work`, or ask a running one to stop."""
+        state = self.reader.work_state()
+        if state == "stopping":
+            self.notify("Already stopping: running agents are finishing their tasks.")
+            return
+        if state == "running":
+            self._confirm(
+                "[bold]Stop work?[/]\n\nNothing new starts. Agents already running "
+                "finish their current task, then the scheduler exits.",
+                self._stop_work,
+            )
+            return
+        provider = self.snapshot.provider if self.snapshot else None
+        on = f" on {provider.label}" if provider else ""
+        self._confirm(
+            f"[bold]Start work{on}?[/]\n\nRuns every ready task, like `agentctl "
+            "work` in a terminal. This uses paid model usage. It keeps running if "
+            "you close the dashboard; press w again to stop it.",
+            self._start_work,
+        )
+
+    def _start_work(self) -> None:
+        try:
+            log = self.reader.start_work()
+        except Exception as exc:
+            self.notify(f"Could not start work: {exc}", severity="error")
+            return
+        self.notify(f"Output: {log}", title="Work started")
+        self.refresh_snapshot()
+
+    def _stop_work(self) -> None:
+        self.reader.stop_work()
+        self.notify("Running agents finish their tasks; nothing new starts.", title="Stopping")
+        self.refresh_snapshot()
+
+    # ------------------------------------------------------ block and stop
+
+    def action_block(self) -> None:
+        key = self.selected_task_key()
+        if key is None:
+            self.notify("Select a task to block (tasks panel).", severity="warning")
+            return
+        self._confirm(
+            f"[bold]Block {key}?[/]\n\nIt will not be scheduled until you "
+            "unblock it (u). Tasks that depend on it wait too.",
+            lambda: self._task_change("block", key, self.reader.hold),
+        )
+
+    def action_stop(self) -> None:
+        """Pause or resume the selected agent, or cancel the selected task."""
+        if self._selected_agent and self.snapshot is not None:
+            agent = self.snapshot.agent(self._selected_agent)
+            if agent is None:
+                return
+            if agent.status is AgentStatus.PAUSED:
+                self._agent_change("resume", agent.name, self.reader.resume)
+                return
+            self._confirm(
+                f"[bold]Pause {agent.name}?[/]\n\nIt takes no new tasks until you "
+                "press s again to resume it.",
+                lambda: self._agent_change("pause", agent.name, self.reader.pause),
+            )
+            return
+        key = self.selected_task_key()
+        if key is None:
+            self.notify(
+                "Select an agent to pause, or a task to cancel.", severity="warning"
+            )
+            return
+        self._confirm(
+            f"[bold]Cancel {key}?[/]\n\nThis cannot be undone. Tasks that "
+            "depend on it will be blocked. To pause it instead, use b.",
+            lambda: self._task_change("cancel", key, self.reader.cancel),
+        )
+
+    def _task_change(self, verb: str, key: str, apply) -> None:
+        try:
+            task = apply(key)
+        except (InvalidTaskTransition, TaskNotFound) as exc:
+            self.notify(f"Could not {verb} {key}: {exc}", severity="error")
+            return
+        self.notify(f"{key} -> {task.status.value}")
+        self.refresh_snapshot()
+
+    def _agent_change(self, verb: str, name: str, apply) -> None:
+        try:
+            agent = apply(name)
+        except (AgentBusy, InvalidTaskTransition) as exc:
+            self.notify(f"Could not {verb} {name}: {exc}", severity="error")
+            return
+        self.notify(f"{name} -> {agent.status.value}")
+        self.refresh_snapshot()
+
+    def _confirm(self, question: str, then) -> None:
+        def decided(answer: bool | None) -> None:
+            if answer:
+                then()
+
+        self.push_screen(ConfirmScreen(question), decided)

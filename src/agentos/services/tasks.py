@@ -257,6 +257,38 @@ class TaskService:
         self.refresh_readiness()
         return cancelled
 
+    HELD = "Held by operator."
+
+    def hold(self, key_or_id: str | int, reason: str | None = None) -> TaskView:
+        """Keep a waiting task from being scheduled until it is unblocked.
+
+        Only for work that has not started: a running task belongs to the
+        scheduler that launched it, and changing it underneath would leave that
+        scheduler settling a task that moved.
+        """
+        task = self.tasks.get(key_or_id)
+        if task.status not in {TaskStatus.PENDING, TaskStatus.READY, TaskStatus.BLOCKED}:
+            raise InvalidTaskTransition(
+                f"{task.key} is {task.status.value}; only waiting tasks can be held"
+            )
+        if task.status is TaskStatus.BLOCKED and task.needs_intervention:
+            raise InvalidTaskTransition(f"{task.key} is already held")
+        held = self.tasks.set_status(
+            key_or_id,
+            TaskStatus.BLOCKED,
+            error=reason or self.HELD,
+            needs_intervention=True,
+        )
+        self.events.emit(
+            EventType.TASK_BLOCKED,
+            summary="held by operator",
+            task_key=held.key,
+            agent=held.assigned_agent,
+            objective_id=held.objective_id,
+        )
+        self.refresh_readiness()
+        return self.tasks.get(key_or_id)
+
     def retry(self, key_or_id: str | int) -> TaskView:
         """Put a failed task back in the queue.
 

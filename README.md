@@ -262,7 +262,7 @@ Run `agentctl --help` or `agentctl <command> --help` for the complete interface.
 | Plan an objective | `agentctl run "<objective>"` |
 | Execute ready work | `agentctl work` |
 | Exercise scheduling without model calls | `agentctl work --dry-run` |
-| Inspect progress | `agentctl status`, `agentctl dashboard` |
+| Inspect progress | `agentctl status`, `agentctl dashboard`, `agentctl gui` |
 | Manage the task graph | `agentctl tasks`, `agentctl task ...`, `agentctl replan` |
 | Inspect agents and runs | `agentctl agents`, `agentctl agent ...`, `agentctl logs <agent>` |
 | Send or inspect messages | `agentctl message <agent> "<text>"`, `agentctl messages` |
@@ -276,6 +276,25 @@ Run `agentctl --help` or `agentctl <command> --help` for the complete interface.
 The Textual dashboard is an operational view over the same services used by the
 CLI. It shows agents, tasks, messages, attention items, recent runs, and change
 summaries. It does not run the scheduler on its own.
+
+### Web dashboard
+
+`agentctl gui` opens the same dashboard as a local web app: a board of tasks
+moving through lanes, a "needs you" row, agents, per-agent changes with full
+diffs, messages and the live work log, plus the same actions as the terminal
+dashboard (start/stop work, unblock, retry, block, cancel, pause, switch
+provider). It listens on 127.0.0.1 only and every API call needs the random
+token in the link it opens.
+
+The frontend is React in `gui/`; its build is served from
+`src/agentos/gui/static`. After changing it:
+
+```bash
+cd gui
+npm install
+npm run build     # type-checks, then writes into src/agentos/gui/static
+npm run dev       # hot reload; proxies /api to `agentctl gui --port 8765`
+```
 
 ## Safety model
 

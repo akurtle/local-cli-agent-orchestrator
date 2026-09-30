@@ -88,6 +88,21 @@ def resolve_executable(explicit: str | None = None) -> str:
     )
 
 
+def long_path(path: str) -> str:
+    """Expand an 8.3 short name (ABCDEF~1) to the real one, if it exists."""
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return path
+
+
+def claude_temp_dir() -> str:
+    """Where Claude Code keeps its own scratch files, in long form."""
+    import tempfile
+
+    return str(Path(long_path(tempfile.gettempdir())) / "claude")
+
+
 class _NullTimeout:
     """Stand-in for asyncio.timeout(None) so the `async with` reads cleanly."""
 
@@ -207,6 +222,10 @@ class ClaudeRunner:
         if request.disallowed_tools:
             argv += ["--disallowedTools", *request.disallowed_tools]
 
+        # Claude keeps background-command output under TEMP\claude and reads it
+        # back; outside the working directory, that read is otherwise declined.
+        argv += ["--add-dir", claude_temp_dir()]
+
         # An explicit --permission-mode in extra_args is the user's override.
         if request.permission_mode and "--permission-mode" not in self.extra_args:
             argv += ["--permission-mode", request.permission_mode]
@@ -222,6 +241,13 @@ class ClaudeRunner:
         env = os.environ.copy()
         # Force UTF-8 on the pipe; the Windows console default is cp1252.
         env["PYTHONIOENCODING"] = "utf-8"
+        # Windows often hands out TEMP in 8.3 form (C:\Users\ABCDEF~1\...).
+        # Claude writes background-command output under TEMP and then reads it
+        # back, and its directory allowance only matches the long spelling, so
+        # a short TEMP gets the agent's own output declined.
+        for key in ("TEMP", "TMP"):
+            if env.get(key):
+                env[key] = long_path(env[key])
         return env
 
     # ------------------------------------------------------------------- events

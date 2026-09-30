@@ -7,7 +7,12 @@ application logic lives in the interface, so the TUI's only job is to display a
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import func
 
@@ -26,7 +31,13 @@ from agentos.schemas.enums import TaskStatus
 from agentos.services.agents import AgentService
 from agentos.services.messages import MessageService
 from agentos.services.objectives import ObjectiveService
-from agentos.services.tasks import TaskService
+from agentos.services.tasks import InvalidTaskTransition, TaskService
+from agentos.worklock import (
+    clear_stop,
+    is_running,
+    request_stop,
+    stop_requested,
+)
 from agentos.tui.attention import (
     AttentionItem,
     Denial,
@@ -59,6 +70,8 @@ class Snapshot:
     project: str
     provider: ProviderStatus | None = None
     """The provider the next `agentctl work` will use, with its tier models."""
+    work: str | None = None
+    """"running" or "stopping" while a scheduler holds the work lock."""
     agents: list[AgentView] = field(default_factory=list)
     tasks: list[TaskView] = field(default_factory=list)
     objectives: list[ObjectiveView] = field(default_factory=list)
@@ -116,6 +129,17 @@ class SnapshotReader:
     # The only writes the dashboard makes. Both are status changes the CLI
     # offers as `agentctl task unblock|retry`; neither starts an agent.
 
+    # What the dashboard runs for `w`: this interpreter's agentctl.
+    # (-c rather than -m: the cli package already imports main, and -m would
+    # load it twice.)
+    work_command: list[str] = [
+        sys.executable,
+        "-c",
+        "from agentos.cli.main import app; app()",
+        "work",
+    ]
+    work_process: subprocess.Popen | None = None
+
     def _use(self, config: Config) -> None:
         self.config = config
         self.agents = AgentService(self.db, config, _NullRuntime(), self.paths.root)
@@ -143,6 +167,70 @@ class SnapshotReader:
         self._use(apply_override(self.file_config(), name))
         return next(p for p in self.providers() if p.name == name)
 
+    # ---------------------------------------------------------------- work
+
+    def work_state(self) -> str | None:
+        if not is_running(self.paths):
+            return None
+        return "stopping" if stop_requested(self.paths) else "running"
+
+    def start_work(self) -> Path:
+        """Launch `agentctl work` in the background. Returns its log file.
+
+        A separate process, not a task inside the dashboard: it keeps running
+        if the dashboard closes, it is the exact same code path as the terminal
+        command, and the work lock stops a second one starting.
+        """
+        if is_running(self.paths):
+            raise RuntimeError("agentctl work is already running for this project")
+        clear_stop(self.paths)
+        self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+        log = self.paths.logs_dir / f"work-{datetime.now():%Y%m%d-%H%M%S}.log"
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "COLUMNS": "120"}
+        options: dict = {}
+        if sys.platform == "win32":
+            # No console window, and none for the agents it launches either.
+            options["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            options["start_new_session"] = True
+        with open(log, "w", encoding="utf-8") as handle:
+            self.work_process = subprocess.Popen(
+                self.work_command,
+                cwd=self.paths.root,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env=env,
+                **options,
+            )
+        return log
+
+    def stop_work(self) -> None:
+        """Ask the running scheduler to start nothing new and wind down."""
+        request_stop(self.paths)
+
+    # ------------------------------------------------------ tasks and agents
+    # Status changes the CLI also offers. None of them starts an agent.
+
+    def hold(self, key: str) -> TaskView:
+        return self.tasks.hold(key)
+
+    def cancel(self, key: str) -> TaskView:
+        task = self.tasks.get_task(key)
+        if task.status is TaskStatus.RUNNING:
+            raise InvalidTaskTransition(
+                f"{key} is running; stop work (w) and let it finish first"
+            )
+        return self.tasks.cancel(key)
+
+    def pause(self, name: str) -> AgentView:
+        return self.agents.pause(name)
+
+    def resume(self, name: str) -> AgentView:
+        return self.agents.unpause(name)
+
     def unblock(self, key: str) -> TaskView:
         return self.tasks.unblock(key)
 
@@ -159,6 +247,7 @@ class SnapshotReader:
         return Snapshot(
             project=self.config.project.name,
             provider=next((p for p in self.providers() if p.active), None),
+            work=self.work_state(),
             agents=self.agents.list_agents(),
             tasks=tasks,
             objectives=objectives,

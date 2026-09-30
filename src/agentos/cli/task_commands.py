@@ -30,6 +30,7 @@ from agentos.services.tasks import (
     TaskService,
     TaskValidationError,
 )
+from agentos.worklock import WorkLock, clear_stop, stop_requested
 
 console = Console()
 
@@ -360,6 +361,25 @@ def work_command(
 ) -> None:
     """Run ready tasks until nothing can progress."""
     ctx = load_context()
+    lock = WorkLock(ctx.paths)
+    if not lock.acquire():
+        console.print(
+            "[red]Another `agentctl work` is already running for this project.[/] "
+            "Two schedulers would dispatch the same tasks twice."
+        )
+        console.print("[dim]Stop it first: Ctrl+C in its terminal, or w in the dashboard.[/]")
+        ctx.db.dispose()
+        raise typer.Exit(code=1)
+    # A stop asked for before this run started is stale.
+    clear_stop(ctx.paths)
+    try:
+        _work(ctx, dry_run, max_passes)
+    finally:
+        clear_stop(ctx.paths)
+        lock.release()
+
+
+def _work(ctx, dry_run: bool, max_passes: int) -> None:
     agent_service = build_agent_service(ctx, preflight=not dry_run)
     agent_service.sync_from_config()
 
@@ -382,6 +402,7 @@ def work_command(
         task_service=task_service,
         workspace_service=WorkspaceService(ctx.config, ctx.paths),
         on_progress=on_progress,
+        stop_check=lambda: stop_requested(ctx.paths),
     )
 
     console.print(

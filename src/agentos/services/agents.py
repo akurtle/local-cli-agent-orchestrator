@@ -91,12 +91,19 @@ def shell_allowed_tools(
     if Capability.RUN_COMMAND not in capabilities:
         return []
     denied = {name.lower() for name in config.commands.denied}
+    programs = list(dict.fromkeys([*config.commands.allowed, *config.commands.helpers]))
     return [
         f"{tool}({program}:*)"
-        for program in config.commands.allowed
+        for program in programs
         if program.lower() not in denied
         for tool in SHELL_TOOLS
     ]
+
+
+# Tools that change nothing by themselves. Loading a skill only reads its
+# instructions; whatever those instructions then run is checked like anything
+# else. Without this, a headless run declines the Skill tool outright.
+ALWAYS_ALLOWED_TOOLS = ("Skill",)
 
 
 def shell_denied_tools(
@@ -514,7 +521,10 @@ class AgentService:
             if agent.name in self.config.agents
             else agent.model,
             timeout_seconds=timeout,
-            allowed_tools=shell_allowed_tools(self.config, grants.capabilities),
+            allowed_tools=[
+                *ALWAYS_ALLOWED_TOOLS,
+                *shell_allowed_tools(self.config, grants.capabilities),
+            ],
             disallowed_tools=grants.denied_tools
             + shell_denied_tools(self.config, grants.capabilities),
             # Headless runs cannot prompt, so edits are accepted up front for an
