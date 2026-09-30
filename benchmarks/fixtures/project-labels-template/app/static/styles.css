@@ -1,0 +1,70 @@
+:root {
+  color: #17211b;
+  background: #eef3ed;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(760px, calc(100% - 32px));
+  margin: 48px auto;
+}
+
+.eyebrow {
+  color: #39705a;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+h1 {
+  margin-bottom: 8px;
+  font-size: clamp(2rem, 6vw, 4rem);
+}
+
+form,
+article {
+  padding: 20px;
+  border: 1px solid #cad6cd;
+  border-radius: 14px;
+  background: white;
+  box-shadow: 0 8px 24px rgb(31 56 43 / 8%);
+}
+
+form {
+  display: grid;
+  gap: 16px;
+  margin: 32px 0;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+}
+
+input,
+textarea,
+button {
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid #aebeb2;
+  border-radius: 8px;
+  font: inherit;
+}
+
+button {
+  border-color: #235942;
+  color: white;
+  background: #235942;
+  cursor: pointer;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}

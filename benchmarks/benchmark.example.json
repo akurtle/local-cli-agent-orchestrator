@@ -6,7 +6,7 @@
   "tasks": [
     {
       "id": "project-labels",
-      "repository": "C:/Projects/benchmark-fixtures/project-labels",
+      "repository": "work/project-labels",
       "base_ref": "benchmark-start",
       "prompt_file": "tasks/project-labels.md",
       "setup_steps": [

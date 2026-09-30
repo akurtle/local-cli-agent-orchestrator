@@ -7,7 +7,22 @@ reports it, and produces JSON, CSV, and Markdown results.
 
 ## Configure
 
-Copy `benchmark.example.json` and update:
+Create the ready-made local fixture repository:
+
+```powershell
+python benchmarks/create_fixture.py
+```
+
+This creates `benchmarks/work/project-labels`, commits the starting application,
+and adds the `benchmark-start` tag expected by the example configuration. Then
+copy the example configuration:
+
+```powershell
+Copy-Item benchmarks/benchmark.example.json benchmarks/benchmark.json
+```
+
+The included project-labels benchmark is now ready. To benchmark another
+project, update:
 
 - `repository`: a local repository path or Git URL containing a fixed benchmark
   starting point
