@@ -1,0 +1,93 @@
+{
+  "output_directory": "output",
+  "repetitions": 5,
+  "seed": 20260930,
+  "timeout_seconds": 3600,
+  "tasks": [
+    {
+      "id": "project-labels",
+      "repository": "C:/Projects/benchmark-fixtures/project-labels",
+      "base_ref": "benchmark-start",
+      "prompt_file": "tasks/project-labels.md",
+      "setup_steps": [
+        {
+          "name": "install dependencies",
+          "command": ["python", "-m", "pip", "install", "-e", ".[dev]"]
+        }
+      ],
+      "evaluation_setup_steps": [
+        {
+          "name": "copy held-out tests",
+          "command": [
+            "python",
+            "-c",
+            "import shutil; shutil.copytree(r'{benchmark_root}/evaluators/project-labels', r'{workspace}/tests/held_out', dirs_exist_ok=True)"
+          ]
+        }
+      ],
+      "evaluation_steps": [
+        {
+          "name": "pytest",
+          "command": ["python", "-m", "pytest", "-q"]
+        }
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "single-claude",
+      "steps": [
+        {
+          "name": "Claude Code",
+          "model_invocation": true,
+          "command": [
+            "claude",
+            "-p",
+            "--model",
+            "claude-sonnet-5",
+            "--permission-mode",
+            "acceptEdits",
+            "--output-format",
+            "json"
+          ],
+          "stdin": "{prompt}"
+        }
+      ]
+    },
+    {
+      "name": "agentos-claude",
+      "steps": [
+        {
+          "name": "initialize agentos",
+          "command": ["agentctl", "init", "--name", "Benchmark {task_id}"]
+        },
+        {
+          "name": "pin benchmark settings",
+          "command": [
+            "python",
+            "-c",
+            "import shutil; shutil.copyfile(r'{benchmark_root}/agentos.benchmark.yaml', r'{workspace}/agentos.yaml')"
+          ]
+        },
+        {
+          "name": "select Claude",
+          "command": ["agentctl", "provider", "claude"]
+        },
+        {
+          "name": "plan and execute",
+          "command": [
+            "agentctl",
+            "run",
+            "{prompt}",
+            "--auto-approve",
+            "--work"
+          ]
+        },
+        {
+          "name": "integrate",
+          "command": ["agentctl", "integrate", "--apply", "--yes"]
+        }
+      ]
+    }
+  ]
+}
